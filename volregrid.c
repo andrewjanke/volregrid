@@ -58,16 +58,18 @@ typedef enum {
 int      read_config_file(char *filename, char *args[]);
 int      get_model_file_info(char *dst, char *key, char *nextArg);
 void     scale_volume(Volume * vol, double o_min, double o_max, double min, double max);
-void     regrid_point(Volume * totals, Volume * counts,
+void     regrid_point(Volume * totals, Volume * weights,
                       double x, double y, double z, int v_size, double *data_buf);
-void     regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
-                         Volume * totals, Volume * counts, int v_size);
 void     regrid_loop(void *caller_data, long num_voxels,
                      int input_num_buffers, int input_vector_length,
                      double *input_data[],
                      int output_num_buffers, int output_vector_length,
                      double *output_data[], Loop_Info * loop_info);
-void     regrid_minc(char *in_fn, Volume * totals, Volume * counts, int v_size);
+void     regrid_minc(char *in_fn, Volume * totals, Volume * weights, int v_size,
+                     double floor, double ceil);
+void     regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
+                         Volume * totals, Volume * weights, int v_size,
+                         double floor, double ceil);
 
 /* argument variables and table */
 static int verbose = FALSE;
@@ -76,20 +78,22 @@ static nc_type in_dtype = NC_FLOAT;
 static int in_is_signed = FALSE;
 static int max_buffer_size_in_kb = 4 * 1024;
 static int vect_size = 1;
+static char *weights_fn = NULL;
 
 /* arb path variables */
-char    *ap_coord_fn = NULL;
+static char *ap_coord_fn = NULL;
 
 /* regridding options */
-double   regrid_radius = 2.0;
-Regrid_op regrid_type = GAUSSIAN_FUNC;
-double   regrid_sigma = 1.0;
+static double regrid_range[2] = { -DBL_MAX, DBL_MAX };
+static double regrid_radius = 2.0;
+static Regrid_op regrid_type = GAUSSIAN_FUNC;
+static double regrid_sigma = 1.0;
 
 /* output file parameters */
-char    *out_config_fn = NULL;
-nc_type  out_dtype = NC_UNSPECIFIED;
-int      out_is_signed = DEF_BOOL;
-double   out_range[2] = { -DBL_MAX, DBL_MAX };
+static char *out_config_fn = NULL;
+static nc_type out_dtype = NC_UNSPECIFIED;
+static int out_is_signed = DEF_BOOL;
+static double out_range[2] = { -DBL_MAX, DBL_MAX };
 
 Volume_Definition out_inf = {
    3,
@@ -118,6 +122,8 @@ static ArgvInfo argTable[] = {
     "Overwrite existing files."},
    {"-max_buffer_size_in_kb", ARGV_INT, (char *)1, (char *)&max_buffer_size_in_kb,
     "maximum size of internal buffers."},
+   {"-weights", ARGV_STRING, (char *)1, (char *)&weights_fn,
+    "<file.mnc> output weights to specified file"},
 
    {NULL, ARGV_HELP, NULL, NULL, "\nRaw Infile Options"},
    {"-byte", ARGV_CONSTANT, (char *)NC_BYTE, (char *)&in_dtype,
@@ -184,6 +190,12 @@ static ArgvInfo argTable[] = {
     "Direction cosines along the z dimension"},
 
    {NULL, ARGV_HELP, NULL, NULL, "\nRegridding options"},
+   {"-regrid_floor", ARGV_FLOAT, (char *)1, (char *)&regrid_range[0],
+    "Ignore input data below this value during regridding."},
+   {"-regrid_ceil", ARGV_FLOAT, (char *)1, (char *)&regrid_range[1],
+    "Ignore input data above this value during regridding."},
+   {"-regrid_range", ARGV_FLOAT, (char *)2, (char *)regrid_range,
+    "Ignore input data outside the input range during regridding."},
    {"-regrid_radius", ARGV_FLOAT, (char *)1, (char *)&regrid_radius,
     "Defines the Window radius for regridding (in mm)."},
    {"-kaiser_bessel", ARGV_CONSTANT, (char *)KAISERBESSEL_FUNC, (char *)&regrid_type,
@@ -210,27 +222,27 @@ int main(int argc, char *argv[])
    char    *out_fn;
    char    *history;
    progress_struct progress;
-   Status   status;
-   Volume   totals, counts;
+   Volume   totals, weights;
    int      i, j, k, v;
    double   min, max;
+   double   w_min, w_max;
    long     num_missed;
    double   weight, value;
-   
-   int sizes[MAX_VAR_DIMS];
-   double starts[MAX_VAR_DIMS];
-   double steps[MAX_VAR_DIMS];
-   Real tmp_dircos[WORLD_NDIMS];
+
+   int      sizes[MAX_VAR_DIMS];
+   double   starts[MAX_VAR_DIMS];
+   double   steps[MAX_VAR_DIMS];
 
    /* get the history string */
    history = time_stamp(argc, argv);
 
    /* get args */
    if(ParseArgv(&argc, argv, argTable, 0) || (argc < 3)){
-      fprintf(stderr, "\nUsage: %s [options] <infile.raw> <out.mnc>\n", argv[0]);
-      fprintf(stderr, "       %s [options] <in1.mnc> [<in2.mnc> [...]] <out.mnc>\n",
-              argv[0]);
-      fprintf(stderr, "       %s [-help]\n\n", argv[0]);
+      fprintf(stderr,
+              "\nUsage: %s [options] <in1.mnc> [<in2.mnc> [...]] <out.mnc>\n", argv[0]);
+      fprintf(stderr,
+              "       %s [options] -arb_path pth.conf <infile.raw> <out.mnc>\n", argv[0]);
+      fprintf(stderr, "       %s -help\n\n", argv[0]);
       exit(EXIT_FAILURE);
       }
 
@@ -250,9 +262,17 @@ int main(int argc, char *argv[])
          }
       }
    if(!clobber && file_exists(out_fn)){
-      fprintf(stderr, "%s: File %s exists, use -clobber to overwrite.\n\n", argv[0],
-              out_fn);
+      fprintf(stderr, "%s: %s exists, -clobber to overwrite.\n\n", argv[0], out_fn);
       exit(EXIT_FAILURE);
+      }
+
+   /* check for weights_fn if required */
+   if(weights_fn != NULL){
+      if(!clobber && file_exists(weights_fn)){
+         fprintf(stderr, "%s: %s exists, -clobber to overwrite.\n\n", argv[0],
+                 weights_fn);
+         exit(EXIT_FAILURE);
+         }
       }
 
    /* set up parameters for reconstruction */
@@ -291,15 +311,15 @@ int main(int argc, char *argv[])
    if(verbose){
       fprintf_vol_def(stdout, &out_inf);
       }
-   
+
    /* transpose the geometry arrays */
-   for(i=0; i<WORLD_NDIMS; i++){
+   for(i = 0; i < WORLD_NDIMS; i++){
       sizes[i] = out_inf.nelem[perm[i]];
       starts[i] = out_inf.start[perm[i]];
       steps[i] = out_inf.step[perm[i]];
       }
-   sizes[WORLD_NDIMS] = vect_size; 
-   
+   sizes[WORLD_NDIMS] = vect_size;
+
    /* create the totals volume */
    totals = create_volume((vect_size > 1) ? 4 : 3,
                           (vect_size > 1) ? std_dimorder_v : std_dimorder,
@@ -307,27 +327,26 @@ int main(int argc, char *argv[])
    set_volume_sizes(totals, sizes);
    set_volume_starts(totals, starts);
    set_volume_separations(totals, steps);
-   for(i=0; i<WORLD_NDIMS; i++){
-      for(j=0; j<WORLD_NDIMS; j++){
-         tmp_dircos[j] = (Real)out_inf.dircos[perm[i]][j];
-         fprintf(stdout, "[%d] Dircos[%d] %g\n", i, j, tmp_dircos[j]); 
-         }
-      set_volume_direction_cosine(totals, i, tmp_dircos);
+   for(i = 0; i < WORLD_NDIMS; i++){
+      set_volume_direction_cosine(totals, i, out_inf.dircos[i]);
       }
    alloc_volume_data(totals);
-   
-   /* create the "counts" volume */
-   counts = create_volume(3, std_dimorder, out_dtype, out_is_signed, 0.0, 0.0);
-   set_volume_sizes(counts, sizes);
-   set_volume_starts(counts, starts);
-   set_volume_separations(counts, steps);
-   alloc_volume_data(counts);
+
+   /* create the "weights" volume */
+   weights = create_volume(3, std_dimorder, out_dtype, out_is_signed, 0.0, 0.0);
+   set_volume_sizes(weights, sizes);
+   set_volume_starts(weights, starts);
+   set_volume_separations(weights, steps);
+   for(i = 0; i < WORLD_NDIMS; i++){
+      set_volume_direction_cosine(weights, i, out_inf.dircos[i]);
+      }
+   alloc_volume_data(weights);
 
    /* initialize both of them */
    for(k = sizes[Z_IDX]; k--;){
       for(j = sizes[Y_IDX]; j--;){
          for(i = sizes[X_IDX]; i--;){
-            set_volume_real_value(counts, k, j, i, 0, 0, 0.0);
+            set_volume_real_value(weights, k, j, i, 0, 0, 0.0);
             for(v = vect_size; v--;){
                set_volume_real_value(totals, k, j, i, v, 0, 0.0);
                }
@@ -352,41 +371,46 @@ int main(int argc, char *argv[])
          fprintf(stdout, " | Output file:     %s\n", out_fn);
          }
 
-      regrid_arb_path(ap_coord_fn, infiles[0], max_buffer_size_in_kb, &totals, &counts,
-                      vect_size);
+      regrid_arb_path(ap_coord_fn, infiles[0], max_buffer_size_in_kb,
+                      &totals, &weights, vect_size, regrid_range[0], regrid_range[1]);
       }
 
    /* else if regridding via a series of input minc file(s) */
    else {
-      int      c;
-
-      for(c = 0; c < n_infiles; c++){
-
-         /* print some pretty output */
+      for(i = 0; i < n_infiles; i++){
          if(verbose){
-            fprintf(stdout, " | Input file:      %s\n", infiles[c]);
+            fprintf(stdout, " | Input file:      %s\n", infiles[i]);
             }
-
-         regrid_minc(infiles[c], &totals, &counts, vect_size);
+         regrid_minc(infiles[i], &totals, &weights,
+                     vect_size, regrid_range[0], regrid_range[1]);
          }
       }
 
-   /* divide totals/counts volume for result */
-   min = DBL_MAX;
-   max = -DBL_MAX;
+   /* initialise min and max counters and divide totals/weights */
    num_missed = 0;
+   min = get_volume_real_value(totals, 0, 0, 0, 0, 0);
+   max = get_volume_real_value(totals, 0, 0, 0, 0, 0);
+   w_min = get_volume_real_value(weights, 0, 0, 0, 0, 0);
+   w_max = get_volume_real_value(weights, 0, 0, 0, 0, 0);
    initialize_progress_report(&progress, FALSE, out_inf.nelem[Z_IDX], "Dividing through");
    for(k = sizes[Z_IDX]; k--;){
       for(j = sizes[Y_IDX]; j--;){
          for(i = sizes[X_IDX]; i--;){
-            weight = get_volume_real_value(counts, k, j, i, 0, 0);
+            weight = get_volume_real_value(weights, k, j, i, 0, 0);
+            if(weight < w_min){
+               w_min = weight;
+               }
+            else if(weight > w_max){
+               w_max = weight;
+               }
+
             if(weight != 0){
                for(v = vect_size; v--;){
                   value = get_volume_real_value(totals, k, j, i, v, 0) / weight;
                   if(value < min){
                      min = value;
                      }
-                  if(value > max){
+                  else if(value > max){
                      max = value;
                      }
 
@@ -402,11 +426,13 @@ int main(int argc, char *argv[])
       }
    terminate_progress_report(&progress);
 
-   /* set the volumes (initial) range */
+   /* set the volumes range */
    if(verbose){
-      fprintf(stdout, " + data range: [%g:%g]\n", min, max);
+      fprintf(stdout, " + data range:   [%g:%g]\n", min, max);
+      fprintf(stdout, " + weight range: [%g:%g]\n", w_min, w_max);
       }
    set_volume_real_range(totals, min, max);
+   set_volume_real_range(weights, w_min, w_max);
 
    if(num_missed > 0 && verbose){
       int      nvox;
@@ -430,16 +456,26 @@ int main(int argc, char *argv[])
 
    /* output the result */
    if(verbose){
-      fprintf(stdout, "Outputting %s...\n", out_fn);
+      fprintf(stdout, " | Outputting %s...\n", out_fn);
       }
-   status =
-      output_volume(out_fn, out_dtype, out_is_signed, 0.0, 0.0, totals, history, NULL);
-   if(status != OK){
-      print_error("Problems outputing: %s", out_fn);
+   if(output_volume(out_fn, out_dtype, out_is_signed,
+                    0.0, 0.0, totals, history, NULL) != OK){
+      fprintf(stderr, "Problems outputing: %s\n\n", out_fn);
+      }
+
+   /* output weights volume if required */
+   if(weights_fn != NULL){
+      if(verbose){
+         fprintf(stdout, " | Outputting %s...\n", weights_fn);
+         }
+      if(output_volume(weights_fn, out_dtype, out_is_signed,
+                       0.0, 0.0, weights, history, NULL) != OK){
+         fprintf(stderr, "Problems outputting: %s\n\n", weights_fn);
+         }
       }
 
    delete_volume(totals);
-   delete_volume(counts);
+   delete_volume(weights);
 
    return (EXIT_SUCCESS);
    }
@@ -504,10 +540,13 @@ typedef struct {
    int      dim_to_space[MAX_VAR_DIMS];
    double   voxel_to_world[WORLD_NDIMS][WORLD_NDIMS + 1];
 
+   double   floor;
+   double   ceil;
+
    double  *data_buf;
 
    Volume  *totals;
-   Volume  *counts;
+   Volume  *weights;
 
    } Loop_Data;
 
@@ -523,6 +562,8 @@ void regrid_loop(void *caller_data, long num_voxels,
    int      v, idim;
    double   voxel_coord[WORLD_NDIMS];
    double   world_coord[WORLD_NDIMS];
+   double   value;
+   int      valid;
 
    /* get pointer to loop data */
    Loop_Data *ld = (Loop_Data *) caller_data;
@@ -547,21 +588,32 @@ void regrid_loop(void *caller_data, long num_voxels,
       transform_coord(&world_coord[0], ld->voxel_to_world, &voxel_coord[0]);
 
       /* get the data */
+      valid = 0;
       for(v = 0; v < input_vector_length; v++){
-         ld->data_buf[v] = input_data[0][(ivox * (long)input_vector_length) + (long)v];
+         value = input_data[0][(ivox * (long)input_vector_length) + (long)v];
+
+         /* check if this point is valid */
+         if(value > ld->floor && value < ld->ceil){
+            valid = 1;
+            }
+
+         ld->data_buf[v] = value;
          }
 
-      /* then regrid the point */
-      regrid_point(ld->totals, ld->counts,
-                   world_coord[0], world_coord[1], world_coord[2],
-                   input_vector_length, ld->data_buf);
+      /* then regrid the point if valid */
+      if(valid){
+         regrid_point(ld->totals, ld->weights,
+                      world_coord[0], world_coord[1], world_coord[2],
+                      input_vector_length, ld->data_buf);
+         }
       }
 
    return;
    }
 
 /* regrid using a minc volume */
-void regrid_minc(char *in_fn, Volume * totals, Volume * counts, int v_size)
+void regrid_minc(char *in_fn, Volume * totals, Volume * weights, int v_size,
+                 double floor, double ceil)
 {
    Loop_Data ld;
    Loop_Options *loop_opt;
@@ -576,8 +628,11 @@ void regrid_minc(char *in_fn, Volume * totals, Volume * counts, int v_size)
    /* alloc space for data_buf */
    ld.data_buf = (double *)malloc(sizeof(double) * v_size);
 
+   ld.floor = floor;
+   ld.ceil = ceil;
+
    ld.totals = totals;
-   ld.counts = counts;
+   ld.weights = weights;
 
    /* set up and do voxel_loop */
    loop_opt = create_loop_options();
@@ -591,8 +646,93 @@ void regrid_minc(char *in_fn, Volume * totals, Volume * counts, int v_size)
    free(ld.data_buf);
    }
 
+/* regrid a volume with an arbitrary path     */
+/* return resulting totals and weights volumes */
+void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
+                     Volume * totals, Volume * weights, int v_size,
+                     double floor, double ceil)
+{
+   Coord_list coord_buf;
+   double  *data_buf = NULL;
+   size_t   data_buf_alloc_size = 0;
+   int      sizes[MAX_VAR_DIMS];
+   int      c, v;
+   int      total_pts;
+   double   value;
+   int      valid;
+
+   /* get volume info */
+   get_volume_sizes(*totals, sizes);
+
+   /* check for the config file */
+   if(!file_exists(coord_fn)){
+      fprintf(stderr, "Couldn't find config file %s.\n\n", coord_fn);
+      exit(EXIT_FAILURE);
+      }
+
+   /* initialise the parser with the config file */
+   if(!init_arb_path(coord_fn, data_fn)){
+      fprintf(stderr, "Failed to init arb_path, this isn't good\n");
+      exit(EXIT_FAILURE);
+      }
+
+   /* get some co-ordinates */
+   if(verbose){
+      fprintf(stdout, " + Doing arbitrary path (vector: %d)\n", v_size);
+      }
+   total_pts = 0;
+   coord_buf = get_some_arb_path_coords(buff_size);
+   while(coord_buf->n_pts != 0){
+
+      /* grow data_buf if we have to */
+      if(coord_buf->n_pts * v_size > data_buf_alloc_size){
+         data_buf_alloc_size = coord_buf->n_pts * v_size;
+         data_buf = realloc(data_buf, data_buf_alloc_size * sizeof(*data_buf));
+         }
+
+      /* get the data */
+      if(!get_some_arb_path_data
+         (data_buf, in_dtype, in_is_signed, coord_buf->n_pts, v_size)){
+         fprintf(stderr, "failed getting data\n");
+         exit(EXIT_FAILURE);
+         }
+
+      total_pts += coord_buf->n_pts;
+      if(verbose){
+         fprintf(stdout, " | got %d co-ords   total: %d\n", coord_buf->n_pts, total_pts);
+         }
+
+      /* regrid (do the nasty) */
+      for(c = 0; c < coord_buf->n_pts; c++){
+
+         /* check if this point is in range */
+         valid = 0;
+         for(v = 0; v < v_size; v++){
+            value = data_buf[(c * v_size) + v];
+
+            if(value > floor && value < ceil){
+               valid = 1;
+               }
+            }
+
+         if(valid){
+            regrid_point(totals, weights,
+                         coord_buf->pts[c].coord[0],
+                         coord_buf->pts[c].coord[1],
+                         coord_buf->pts[c].coord[2], v_size, &data_buf[c * v_size]);
+            }
+         }
+
+      /* get the next lot of co-ordinates */
+      coord_buf = get_some_arb_path_coords(buff_size);
+      }
+
+   /* finish up */
+   end_arb_path();
+   }
+
 /* regrid a point in a file using the input co-ordinate and data */
-void regrid_point(Volume * totals, Volume * counts,
+void regrid_point(Volume * totals, Volume * weights,
                   double x, double y, double z, int v_size, double *data_buf)
 {
 
@@ -685,8 +825,8 @@ void regrid_point(Volume * totals, Volume * counts,
                   }
 
                /* increment count value */
-               value = get_volume_real_value(*counts, k, j, i, 0, 0);
-               set_volume_real_value(*counts, k, j, i, 0, 0, value + weight);
+               value = get_volume_real_value(*weights, k, j, i, 0, 0);
+               set_volume_real_value(*weights, k, j, i, 0, 0, value + weight);
                }
 
             c_pos[2] += steps[perm[2]];
@@ -698,76 +838,6 @@ void regrid_point(Volume * totals, Volume * counts,
       c_pos[0] += steps[perm[0]];
       }
 
-   }
-
-/* regrid a volume with an arbitrary path     */
-/* return resulting totals and counts volumes */
-void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
-                     Volume * totals, Volume * counts, int v_size)
-{
-   Coord_list coord_buf;
-   double  *data_buf = NULL;
-   size_t   data_buf_alloc_size = 0;
-   int      sizes[MAX_VAR_DIMS];
-   int      c;
-   int      total_pts;
-
-   /* get volume info */
-   get_volume_sizes(*totals, sizes);
-
-   /* check for the config file */
-   if(!file_exists(coord_fn)){
-      fprintf(stderr, "Couldn't find config file %s.\n\n", coord_fn);
-      exit(EXIT_FAILURE);
-      }
-
-   /* initialise the parser with the config file */
-   if(!init_arb_path(coord_fn, data_fn)){
-      fprintf(stderr, "Failed to init arb_path, this isn't good\n");
-      exit(EXIT_FAILURE);
-      }
-
-   /* get some co-ordinates */
-   if(verbose){
-      fprintf(stdout, " + Doing arbitrary path (vector: %d)\n", v_size);
-      }
-   total_pts = 0;
-   coord_buf = get_some_arb_path_coords(buff_size);
-   while(coord_buf->n_pts != 0){
-
-      /* grow data_buf if we have to */
-      if(coord_buf->n_pts * v_size > data_buf_alloc_size){
-         data_buf_alloc_size = coord_buf->n_pts * v_size;
-         data_buf = realloc(data_buf, data_buf_alloc_size * sizeof(*data_buf));
-         }
-
-      /* get the data */
-      if(!get_some_arb_path_data
-         (data_buf, in_dtype, in_is_signed, coord_buf->n_pts, v_size)){
-         fprintf(stderr, "failed getting data\n");
-         exit(EXIT_FAILURE);
-         }
-
-      total_pts += coord_buf->n_pts;
-      if(verbose){
-         fprintf(stdout, " | got %d co-ords   total: %d\n", coord_buf->n_pts, total_pts);
-         }
-
-      /* regrid (do the nasty) */
-      for(c = 0; c < coord_buf->n_pts; c++){
-
-         regrid_point(totals, counts,
-                      coord_buf->pts[c].coord[0],
-                      coord_buf->pts[c].coord[1],
-                      coord_buf->pts[c].coord[2], v_size, &data_buf[c * v_size]);
-         }
-
-      /* get the next lot of co-ordinates */
-      coord_buf = get_some_arb_path_coords(buff_size);
-      }
-
-   /* finish up */
-   end_arb_path();
    }
 
 /* convert input file to equiv C/L, return number of args read */

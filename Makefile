@@ -3,7 +3,7 @@ HEADERS = arb_path_io.h minc_support.h
 OBJS = $(PROGS:=.o) $(HEADERS:.h=.o) lex.o
 
 LEX=flex
-CC=cc
+CC=gcc
 
 # WARN = -Wall
 WARN = -Wall -Wtraditional -Wshadow -Wpointer-arith -Wcast-qual \
@@ -15,7 +15,7 @@ OPTIONS = $(WARN) -O3
 INCLUDES = -I/usr/local/mni/include
 CFLAGS = $(OPTIONS) $(INCLUDES) `gsl-config --cflags`
 
-LDINCLUDES = -L/usr/local/mni/lib
+LDINCLUDES = -L/usr/local/mni/lib -L/usr/local/lib
 LDLIBS = -lvolume_io -lminc -lnetcdf -lm
 LDOPTS = $(LDINCLUDES) $(LDLIBS) `gsl-config --libs`
 
