@@ -899,8 +899,8 @@ void regrid_point(Volume * totals, Volume * weights,
    fill_Vector(vector, dir[0], dir[1], dir[2]);
    set_transform_z_axis(&dircos, &vector);
 
-   for_less(i, 0, 4){
-      for_less(j, 0, 4){
+   for(i = 0; i < 4; i++){
+      for(j = 0; j < 4; j++){
          Transform_elem(invdircos, i, j) = Transform_elem(dircos, j, i);
          }
       }
