@@ -7,29 +7,31 @@ INT       "-"?{DIGIT}+
 COORD     {REAL}\,{REAL}\,{REAL}
 RCOORD    "@["{COORD}"]"
 
-%{ 
-   #include <stdio.h>
-   #include <math.h>
-   #include <string.h>
-   #include "arb_path_io.h"
-   
-   /* function prototypes */
-   int get_coord_from_str(char *str, double *x, double *y, double *z);
-   int get_reps_from_str(char *str);
-   void yyerror(void);
-   
-   /* global parsing vars */
-   int line_num = 1;
-   int c_list_id = 0;
-   int id;
-   char list_name[256];
-   double x,y,z,reps;
-   
-   int    mat_pos = 0;
-   double MAT[12] = {1,0,0,0,
-                     0,1,0,0,
-                     0,0,1,0};
-   
+%{
+
+#include <stdio.h>
+#include <math.h>
+#include <string.h>
+#include "arb_path_io.h"
+
+/* function prototypes */
+int      get_coord_from_str(char *str);
+int      get_reps_from_str(char *str);
+void     yyerror(void);
+
+/* global parsing vars */
+int      line_num = 1;
+int      c_list_id = 0;
+int      id;
+char     list_name[256];
+double   x, y, z, reps;
+
+int      mat_pos = 0;
+double   MAT[12] = { 1, 0, 0, 0,
+   0, 1, 0, 0,
+   0, 0, 1, 0
+   };
+ 
 %}
 
 /* States */
@@ -43,7 +45,7 @@ RCOORD    "@["{COORD}"]"
 <*>\n                  { line_num++; }  /* count lines */
 
  /* co-ordinates */
-{COORD}                { if(get_coord_from_str(yytext, &x, &y, &z) && 
+{COORD}                { if(get_coord_from_str(yytext) && 
                             add_coord_to_list(0, x, y, z)){
                             return 1;                                
                             }                                        
@@ -52,7 +54,7 @@ RCOORD    "@["{COORD}"]"
                             }                                        
                          }                                           
 {RCOORD}               { yytext+=2;                                         
-                         if(get_coord_from_str(yytext, &x, &y, &z) &&       
+                         if(get_coord_from_str(yytext) &&       
                             add_rcoord_to_list(0, x, y, z, 1)){
                             return 1;                                       
                             }                                               
@@ -61,7 +63,7 @@ RCOORD    "@["{COORD}"]"
                             }                                               
                          }                                                  
 {RCOORD}\*{REAL}       { yytext+=2;                                                          
-                         if(get_coord_from_str(yytext, &x, &y, &z) &&                        
+                         if(get_coord_from_str(yytext) &&                        
                             add_rcoord_to_list(0, x, y, z, get_reps_from_str(yytext))){
                             return 1;                                                        
                             }                                                                
@@ -96,19 +98,19 @@ LIST\ {LIST_ID}        { yytext += 5;
                          }
 <LIST>{
    \{                  
-   {COORD}             { if(!get_coord_from_str(yytext, &x, &y, &z) ||           
+   {COORD}             { if(!get_coord_from_str(yytext) ||           
                             !add_coord_to_list(c_list_id, x, y, z)){
                             yyerror();                                          
                             }                                                   
                          }                                                      
    {RCOORD}            { yytext+=2;                                              
-                         if(!get_coord_from_str(yytext, &x, &y, &z) ||            
+                         if(!get_coord_from_str(yytext) ||            
                             !add_rcoord_to_list(c_list_id, x, y, z, 1)){
                             yyerror();                                           
                             }                                                    
                          }                                                       
    {RCOORD}\*{REAL}    { yytext+=2;
-                         if(!get_coord_from_str(yytext, &x, &y, &z) ||
+                         if(!get_coord_from_str(yytext) ||
                             !add_rcoord_to_list(c_list_id, x, y, z, get_reps_from_str(yytext))){
                             yyerror();                                                                   
                             }                                                                            
@@ -157,11 +159,11 @@ int yywrap(){
    return 1;
    }  
 
-int get_coord_from_str(char *str, double *x, double *y, double *z){
+int get_coord_from_str(char *str){
    char *ptr;
    
    /* get the first double */
-   *x = strtod(str, &ptr);
+   x = strtod(str, &ptr);
    
    /* skip a "," */
    if(ptr[0] != ','){
@@ -169,14 +171,14 @@ int get_coord_from_str(char *str, double *x, double *y, double *z){
       }
    ptr++;
    
-   *y = strtod(ptr, &ptr);
+   y = strtod(ptr, &ptr);
    
    if(ptr[0] != ','){
       return 0;
       }
    ptr++;
    
-   *z = strtod(ptr, &ptr);
+   z = strtod(ptr, &ptr);
    
    return 1;
    }

@@ -21,7 +21,7 @@ double   c_pos[3];
 FILE    *data_fp = NULL;
 
 /* function prototypes */
-int      set_coord_list_size(Coord_list list, size_t size);
+int      set_coord_list_size(Coord_list list, int size);
 int      yyflex_init(char *fname);
 int      yyflex_end(void);
 int      yylex(void);
@@ -74,7 +74,7 @@ void end_arb_path(void)
    }
 
 /* get some more co-ordinates, returns an empty list when done */
-Coord_list get_some_arb_path_coords(size_t max_buf_size)
+Coord_list get_some_arb_path_coords(int max_buf_size)
 {
    /* first empty out the list */
    if(!set_coord_list_size(coord_lists[0], 0)){
@@ -92,11 +92,11 @@ Coord_list get_some_arb_path_coords(size_t max_buf_size)
 
 /* get some arb_path data, returns NULL on fail                */
 int get_some_arb_path_data(double *data_buf, nc_type dtype, int is_signed,
-                           size_t n_pts, size_t vector_size)
+                           int n_pts, int vector_size)
 {
-   size_t   nread;
-   size_t   elem_size;
-   size_t   n_elem;
+   int   nread;
+   int   elem_size;
+   int   n_elem;
    char    *ptr;
    int      c;
 
@@ -107,10 +107,10 @@ int get_some_arb_path_data(double *data_buf, nc_type dtype, int is_signed,
    n_elem = n_pts * vector_size;
 
    /* allocate space for data buffer */
-   tmp = (void *)malloc(elem_size * n_elem);
+   tmp = (void *)malloc((size_t)(elem_size * n_elem));
 
    /* get the data */
-   nread = fread(tmp, elem_size, n_elem, data_fp);
+   nread = fread(tmp, (size_t)elem_size, (size_t)n_elem, data_fp);
    if(nread != n_elem){
       fprintf(stderr, "Premature end of data file: Number read %d != %d\n\n", nread,
               n_elem);
@@ -159,7 +159,7 @@ int get_some_arb_path_data(double *data_buf, nc_type dtype, int is_signed,
    }
 
 /* return a new Coord_list's id */
-int new_coord_list(size_t size, char *name)
+int new_coord_list(int size, char *name)
 {
    int      new_id;
    int      c;
@@ -193,7 +193,7 @@ int new_coord_list(size_t size, char *name)
    }
 
 /* use realloc to set the size of the point data */
-int set_coord_list_size(Coord_list list, size_t size)
+int set_coord_list_size(Coord_list list, int size)
 {
    list->n_pts = size;
 
@@ -259,7 +259,7 @@ int add_coord_to_list(int list_id, double x, double y, double z)
    return 1;
    }
 
-int add_rcoord_to_list(int list_id, double x, double y, double z, double rep)
+int add_rcoord_to_list(int list_id, double x, double y, double z, int rep)
 {
    Coord_list list = coord_lists[list_id];
    int      c_pt = list->n_pts;
