@@ -1,11 +1,17 @@
 PROGS = volregrid
-HEADERS = arb_path_io.h
+HEADERS = arb_path_io.h minc_support.h
 OBJS = $(PROGS:=.o) $(HEADERS:.h=.o) lex.o
 
 LEX=flex
 CC=cc
 
-OPTIONS = -pedantic -Wall -O3
+# WARN = -Wall
+WARN = -Wall -Wtraditional -Wshadow -Wpointer-arith -Wcast-qual \
+       -Wcast-align -Wconversion -Waggregate-return -Wstrict-prototypes \
+       -Wmissing-prototypes -Wmissing-declarations -Wredundant-decls \
+       -Winline -pedantic -Wunused -Wunused-parameter
+
+OPTIONS = $(WARN) -O3
 INCLUDES = -I/usr/local/mni/include
 CFLAGS = $(OPTIONS) $(INCLUDES) `gsl-config --cflags`
 

@@ -29,6 +29,7 @@
 #include <voxel_loop.h>
 #include <gsl/gsl_sf_bessel.h>
 #include "arb_path_io.h"
+#include "minc_support.h"
 
 #define SQR2(x) ((x)*(x))
 #define SQR3(x) ((x)*(x)*(x))
@@ -39,11 +40,13 @@
 #define Z_IDX 0
 #define V_IDX 3
 
-#define WORLD_NDIMS 3
+/* permutation array for IDX's */
+static int perm[3] = { X_IDX, Y_IDX, Z_IDX };
 
-char    *std_dimorder[] = { MIzspace, MIyspace, MIxspace };
-char    *std_dimorder_v[] = { MIzspace, MIyspace, MIxspace, MIvector_dimension };
+static char *std_dimorder[] = { MIzspace, MIyspace, MIxspace };
+static char *std_dimorder_v[] = { MIzspace, MIyspace, MIxspace, MIvector_dimension };
 
+/* enum for regridding types */
 typedef enum {
    UNSPECIFIED_FUNC = 0,
    KAISERBESSEL_FUNC,
@@ -53,27 +56,18 @@ typedef enum {
 
 /* function prototypes */
 int      read_config_file(char *filename, char *args[]);
+int      get_model_file_info(char *dst, char *key, char *nextArg);
 void     scale_volume(Volume * vol, double o_min, double o_max, double min, double max);
 void     regrid_point(Volume * totals, Volume * counts,
-                      double x, double y, double z, int vect_size, double *data_buf);
+                      double x, double y, double z, int v_size, double *data_buf);
 void     regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
-                         Volume * totals, Volume * counts, int vect_size);
+                         Volume * totals, Volume * counts, int v_size);
 void     regrid_loop(void *caller_data, long num_voxels,
                      int input_num_buffers, int input_vector_length,
                      double *input_data[],
                      int output_num_buffers, int output_vector_length,
                      double *output_data[], Loop_Info * loop_info);
-void     regrid_minc(char *in_fn, Volume * totals, Volume * counts, int vect_size);
-void     get_minc_attribute(int mincid, char *varname, char *attname,
-                            int maxvals, double vals[]);
-int      get_minc_ndims(int mincid);
-void     find_minc_spatial_dims(int mincid, int space_to_dim[], int dim_to_space[]);
-void     get_minc_voxel_to_world(int mincid,
-                                 double voxel_to_world[WORLD_NDIMS][WORLD_NDIMS + 1]);
-void     normalize_vector(double vector[]);
-void     transform_coord(double out_coord[],
-                         double transform[WORLD_NDIMS][WORLD_NDIMS + 1],
-                         double in_coord[]);
+void     regrid_minc(char *in_fn, Volume * totals, Volume * counts, int v_size);
 
 /* argument variables and table */
 static int verbose = FALSE;
@@ -81,6 +75,7 @@ static int clobber = FALSE;
 static nc_type in_dtype = NC_FLOAT;
 static int in_is_signed = FALSE;
 static int max_buffer_size_in_kb = 4 * 1024;
+static int vect_size = 1;
 
 /* arb path variables */
 char    *ap_coord_fn = NULL;
@@ -95,9 +90,26 @@ char    *out_config_fn = NULL;
 nc_type  out_dtype = NC_UNSPECIFIED;
 int      out_is_signed = DEF_BOOL;
 double   out_range[2] = { -DBL_MAX, DBL_MAX };
-double   out_start[MAX_VAR_DIMS] = { -50, -50, -50 };
-double   out_step[MAX_VAR_DIMS] = { 1, 1, 1 };
-int      out_length[MAX_VAR_DIMS] = { 100, 100, 100, 1 };
+
+Volume_Definition out_inf = {
+   3,
+
+   {MIxspace, MIyspace, MIzspace},     /* dimnames */
+
+   {Z_IDX, Y_IDX, X_IDX},              /* space to dim */
+   {X_IDX, Y_IDX, Z_IDX},              /* dim to space */
+
+   {100, 100, 100},                    /* nelem */
+   {-50.0, -50.0, -50.0},              /* start */
+   {1.0, 1.0, 1.0},                    /* step */
+   {{1.0, 0.0, 0.0},                   /* direction cosines */
+    {0.0, 1.0, 0.0},
+    {0.0, 0.0, 1.0}},
+
+   {{1.0, 0.0, 0.0, -50.0},            /* voxel to world */
+    {0.0, 1.0, 0.0, -50.0},
+    {0.0, 0.0, 1.0, -50.0}}
+   };
 
 static ArgvInfo argTable[] = {
    {"-verbose", ARGV_CONSTANT, (char *)TRUE, (char *)&verbose,
@@ -122,12 +134,14 @@ static ArgvInfo argTable[] = {
     "Input data is signed integer data."},
    {"-unsigned", ARGV_CONSTANT, (char *)FALSE, (char *)&in_is_signed,
     "Input data is unsigned integer data. (Default)"},
-   {"-vector", ARGV_INT, (char *)1, (char *)&out_length[V_IDX],
+   {"-vector", ARGV_INT, (char *)1, (char *)&vect_size,
     "Size of vector dimension of Input data."},
 
    {NULL, ARGV_HELP, NULL, NULL, "\nOutfile Options"},
    {"-outconfig", ARGV_STRING, (char *)1, (char *)&out_config_fn,
     "Get the output geometry from the input filename (overrides args below)"},
+   {"-like", ARGV_FUNC, (char *)get_model_file_info, (char *)&out_inf,
+    "Specifies a model file for the output geometry."},
    {"-obyte", ARGV_CONSTANT, (char *)NC_BYTE, (char *)&out_dtype,
     "Write out byte data."},
    {"-oshort", ARGV_CONSTANT, (char *)NC_SHORT, (char *)&out_dtype,
@@ -144,24 +158,30 @@ static ArgvInfo argTable[] = {
     "Write unsigned integer data."},
    {"-range", ARGV_FLOAT, (char *)2, (char *)out_range,
     "Range to scale output values between (default = range of input data)."},
-   {"-xstart", ARGV_FLOAT, (char *)1, (char *)&out_start[X_IDX],
-    "Starting coordinate for x dimension."},
-   {"-ystart", ARGV_FLOAT, (char *)1, (char *)&out_start[Y_IDX],
-    "Starting coordinate for y dimension."},
-   {"-zstart", ARGV_FLOAT, (char *)1, (char *)&out_start[Z_IDX],
-    "Starting coordinate for z dimension."},
-   {"-xstep", ARGV_FLOAT, (char *)1, (char *)&out_step[X_IDX],
-    "Step size for x dimension."},
-   {"-ystep", ARGV_FLOAT, (char *)1, (char *)&out_step[Y_IDX],
-    "Step size for y dimension."},
-   {"-zstep", ARGV_FLOAT, (char *)1, (char *)&out_step[Z_IDX],
-    "Step size for z dimension."},
-   {"-xlength", ARGV_INT, (char *)1, (char *)&out_length[X_IDX],
+   {"-xnelements", ARGV_INT, (char *)1, (char *)&out_inf.nelem[0],
     "Number of samples in x dimension."},
-   {"-ylength", ARGV_INT, (char *)1, (char *)&out_length[Y_IDX],
+   {"-ynelements", ARGV_INT, (char *)1, (char *)&out_inf.nelem[1],
     "Number of samples in y dimension."},
-   {"-zlength", ARGV_INT, (char *)1, (char *)&out_length[Z_IDX],
+   {"-znelements", ARGV_INT, (char *)1, (char *)&out_inf.nelem[2],
     "Number of samples in z dimension."},
+   {"-xstart", ARGV_FLOAT, (char *)1, (char *)&out_inf.start[0],
+    "Starting coordinate for x dimension."},
+   {"-ystart", ARGV_FLOAT, (char *)1, (char *)&out_inf.start[1],
+    "Starting coordinate for y dimension."},
+   {"-zstart", ARGV_FLOAT, (char *)1, (char *)&out_inf.start[2],
+    "Starting coordinate for z dimension."},
+   {"-xstep", ARGV_FLOAT, (char *)1, (char *)&out_inf.step[0],
+    "Step size for x dimension."},
+   {"-ystep", ARGV_FLOAT, (char *)1, (char *)&out_inf.step[1],
+    "Step size for y dimension."},
+   {"-zstep", ARGV_FLOAT, (char *)1, (char *)&out_inf.step[2],
+    "Step size for z dimension."},
+   {"-xdircos", ARGV_FLOAT, (char *)3, (char *)out_inf.dircos[0],
+    "Direction cosines along the x dimension"},
+   {"-ydircos", ARGV_FLOAT, (char *)3, (char *)out_inf.dircos[1],
+    "Direction cosines along the y dimension"},
+   {"-zdircos", ARGV_FLOAT, (char *)3, (char *)out_inf.dircos[2],
+    "Direction cosines along the z dimension"},
 
    {NULL, ARGV_HELP, NULL, NULL, "\nRegridding options"},
    {"-regrid_radius", ARGV_FLOAT, (char *)1, (char *)&regrid_radius,
@@ -196,6 +216,11 @@ int main(int argc, char *argv[])
    double   min, max;
    long     num_missed;
    double   weight, value;
+   
+   int sizes[MAX_VAR_DIMS];
+   double starts[MAX_VAR_DIMS];
+   double steps[MAX_VAR_DIMS];
+   Real tmp_dircos[WORLD_NDIMS];
 
    /* get the history string */
    history = time_stamp(argc, argv);
@@ -239,8 +264,8 @@ int main(int argc, char *argv[])
       }
 
    /* check vector dimension size */
-   if(out_length[V_IDX] < 1){
-      fprintf(stderr, "%s: -vector_length must be 1 or greater.\n\n", argv[0]);
+   if(vect_size < 1){
+      fprintf(stderr, "%s: -vector (%d) must be 1 or greater.\n\n", argv[0], vect_size);
       exit(EXIT_FAILURE);
       }
 
@@ -263,28 +288,47 @@ int main(int argc, char *argv[])
          }
       }
 
+   if(verbose){
+      fprintf_vol_def(stdout, &out_inf);
+      }
+   
+   /* transpose the geometry arrays */
+   for(i=0; i<WORLD_NDIMS; i++){
+      sizes[i] = out_inf.nelem[perm[i]];
+      starts[i] = out_inf.start[perm[i]];
+      steps[i] = out_inf.step[perm[i]];
+      }
+   sizes[WORLD_NDIMS] = vect_size; 
+   
    /* create the totals volume */
-   totals = create_volume((out_length[V_IDX] > 1) ? 4 : 3,
-                          (out_length[V_IDX] > 1) ? std_dimorder_v : std_dimorder,
+   totals = create_volume((vect_size > 1) ? 4 : 3,
+                          (vect_size > 1) ? std_dimorder_v : std_dimorder,
                           out_dtype, out_is_signed, 0.0, 0.0);
-   set_volume_sizes(totals, out_length);
-   set_volume_starts(totals, out_start);
-   set_volume_separations(totals, out_step);
+   set_volume_sizes(totals, sizes);
+   set_volume_starts(totals, starts);
+   set_volume_separations(totals, steps);
+   for(i=0; i<WORLD_NDIMS; i++){
+      for(j=0; j<WORLD_NDIMS; j++){
+         tmp_dircos[j] = (Real)out_inf.dircos[perm[i]][j];
+         fprintf(stdout, "[%d] Dircos[%d] %g\n", i, j, tmp_dircos[j]); 
+         }
+      set_volume_direction_cosine(totals, i, tmp_dircos);
+      }
    alloc_volume_data(totals);
-
+   
    /* create the "counts" volume */
    counts = create_volume(3, std_dimorder, out_dtype, out_is_signed, 0.0, 0.0);
-   set_volume_sizes(counts, out_length);
-   set_volume_starts(counts, out_start);
-   set_volume_separations(counts, out_step);
+   set_volume_sizes(counts, sizes);
+   set_volume_starts(counts, starts);
+   set_volume_separations(counts, steps);
    alloc_volume_data(counts);
 
    /* initialize both of them */
-   for(k = out_length[Z_IDX]; k--;){
-      for(j = out_length[Y_IDX]; j--;){
-         for(i = out_length[X_IDX]; i--;){
+   for(k = sizes[Z_IDX]; k--;){
+      for(j = sizes[Y_IDX]; j--;){
+         for(i = sizes[X_IDX]; i--;){
             set_volume_real_value(counts, k, j, i, 0, 0, 0.0);
-            for(v = out_length[V_IDX]; v--;){
+            for(v = vect_size; v--;){
                set_volume_real_value(totals, k, j, i, v, 0, 0.0);
                }
             }
@@ -309,7 +353,7 @@ int main(int argc, char *argv[])
          }
 
       regrid_arb_path(ap_coord_fn, infiles[0], max_buffer_size_in_kb, &totals, &counts,
-                      out_length[V_IDX]);
+                      vect_size);
       }
 
    /* else if regridding via a series of input minc file(s) */
@@ -323,7 +367,7 @@ int main(int argc, char *argv[])
             fprintf(stdout, " | Input file:      %s\n", infiles[c]);
             }
 
-         regrid_minc(infiles[c], &totals, &counts, out_length[V_IDX]);
+         regrid_minc(infiles[c], &totals, &counts, vect_size);
          }
       }
 
@@ -331,13 +375,13 @@ int main(int argc, char *argv[])
    min = DBL_MAX;
    max = -DBL_MAX;
    num_missed = 0;
-   initialize_progress_report(&progress, FALSE, out_length[Z_IDX], "Dividing through");
-   for(k = out_length[Z_IDX]; k--;){
-      for(j = out_length[Y_IDX]; j--;){
-         for(i = out_length[X_IDX]; i--;){
+   initialize_progress_report(&progress, FALSE, out_inf.nelem[Z_IDX], "Dividing through");
+   for(k = sizes[Z_IDX]; k--;){
+      for(j = sizes[Y_IDX]; j--;){
+         for(i = sizes[X_IDX]; i--;){
             weight = get_volume_real_value(counts, k, j, i, 0, 0);
             if(weight != 0){
-               for(v = out_length[V_IDX]; v--;){
+               for(v = vect_size; v--;){
                   value = get_volume_real_value(totals, k, j, i, v, 0) / weight;
                   if(value < min){
                      min = value;
@@ -364,10 +408,10 @@ int main(int argc, char *argv[])
       }
    set_volume_real_range(totals, min, max);
 
-   if(num_missed > 0){
+   if(num_missed > 0 && verbose){
       int      nvox;
 
-      nvox = out_length[X_IDX] * out_length[Y_IDX] * out_length[Z_IDX];
+      nvox = out_inf.nelem[X_IDX] * out_inf.nelem[Y_IDX] * out_inf.nelem[Z_IDX];
       fprintf(stdout,
               "\n-regrid_radius possibly too small, no data in %ld/%d[%2.2f%%] voxels\n\n",
               num_missed, nvox, ((float)num_missed / nvox * 100));
@@ -388,7 +432,8 @@ int main(int argc, char *argv[])
    if(verbose){
       fprintf(stdout, "Outputting %s...\n", out_fn);
       }
-   status = output_volume(out_fn, out_dtype, out_is_signed, 0, 0, totals, history, NULL);
+   status =
+      output_volume(out_fn, out_dtype, out_is_signed, 0.0, 0.0, totals, history, NULL);
    if(status != OK){
       print_error("Problems outputing: %s", out_fn);
       }
@@ -474,7 +519,7 @@ void regrid_loop(void *caller_data, long num_voxels,
                  double *output_data[], Loop_Info * loop_info)
 {
    long     ivox;
-   long     index[MAX_VAR_DIMS];
+   long     idx[MAX_VAR_DIMS];
    int      v, idim;
    double   voxel_coord[WORLD_NDIMS];
    double   world_coord[WORLD_NDIMS];
@@ -483,21 +528,21 @@ void regrid_loop(void *caller_data, long num_voxels,
    Loop_Data *ld = (Loop_Data *) caller_data;
 
    /* shut the compiler up - yes I _know_ I don't use these */
-//   (void)output_num_buffers;
-//   (void)output_vector_length;
-//   (void)output_data;
-//   (void)loop_info;
+   (void)input_num_buffers;
+   (void)output_num_buffers;
+   (void)output_vector_length;
+   (void)output_data;
 
    /* for each (vector) voxel */
    for(ivox = 0; ivox < num_voxels * (long)input_vector_length;
        ivox += (long)input_vector_length){
 
       /* figure out where we are in space */
-      get_info_voxel_index(loop_info, ivox, ld->file_ndims, index);
+      get_info_voxel_index(loop_info, ivox, ld->file_ndims, idx);
 
       /* convert voxel index to world co-ordinate */
       for(idim = 0; idim < WORLD_NDIMS; idim++){
-         voxel_coord[idim] = index[ld->space_to_dim[idim]];
+         voxel_coord[idim] = idx[ld->space_to_dim[idim]];
          }
       transform_coord(&world_coord[0], ld->voxel_to_world, &voxel_coord[0]);
 
@@ -516,7 +561,7 @@ void regrid_loop(void *caller_data, long num_voxels,
    }
 
 /* regrid using a minc volume */
-void regrid_minc(char *in_fn, Volume * totals, Volume * counts, int vect_size)
+void regrid_minc(char *in_fn, Volume * totals, Volume * counts, int v_size)
 {
    Loop_Data ld;
    Loop_Options *loop_opt;
@@ -525,11 +570,11 @@ void regrid_minc(char *in_fn, Volume * totals, Volume * counts, int vect_size)
    /* Open the file to get some information */
    mincid = miopen(in_fn, NC_NOWRITE);
    ld.file_ndims = get_minc_ndims(mincid);
-   find_minc_spatial_dims(mincid, ld.space_to_dim, ld.dim_to_space);
+   get_minc_spatial_dims(mincid, ld.space_to_dim, ld.dim_to_space);
    get_minc_voxel_to_world(mincid, ld.voxel_to_world);
 
    /* alloc space for data_buf */
-   ld.data_buf = (double *)malloc(sizeof(double) * vect_size);
+   ld.data_buf = (double *)malloc(sizeof(double) * v_size);
 
    ld.totals = totals;
    ld.counts = counts;
@@ -548,7 +593,7 @@ void regrid_minc(char *in_fn, Volume * totals, Volume * counts, int vect_size)
 
 /* regrid a point in a file using the input co-ordinate and data */
 void regrid_point(Volume * totals, Volume * counts,
-                  double x, double y, double z, int vect_size, double *data_buf)
+                  double x, double y, double z, int v_size, double *data_buf)
 {
 
    int      sizes[MAX_VAR_DIMS];
@@ -562,8 +607,6 @@ void regrid_point(Volume * totals, Volume * counts,
    double   c_pos[3];
    int      i, j, k, v;
    double   coord[3];
-
-   int      perm[3] = { X_IDX, Y_IDX, Z_IDX };  /* permutation array for IDX's */
 
    coord[0] = x;
    coord[1] = y;
@@ -635,7 +678,7 @@ void regrid_point(Volume * totals, Volume * counts,
                   }
 
                /* set data values */
-               for(v = 0; v < vect_size; v++){
+               for(v = 0; v < v_size; v++){
                   value = get_volume_real_value(*totals, k, j, i, v, 0);
                   set_volume_real_value(*totals, k, j, i, v, 0,
                                         value + (data_buf[0 + v] * weight));
@@ -660,7 +703,7 @@ void regrid_point(Volume * totals, Volume * counts,
 /* regrid a volume with an arbitrary path     */
 /* return resulting totals and counts volumes */
 void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
-                     Volume * totals, Volume * counts, int vect_size)
+                     Volume * totals, Volume * counts, int v_size)
 {
    Coord_list coord_buf;
    double  *data_buf = NULL;
@@ -686,21 +729,21 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
 
    /* get some co-ordinates */
    if(verbose){
-      fprintf(stdout, " + Doing arbitrary path (vector: %d)\n", vect_size);
+      fprintf(stdout, " + Doing arbitrary path (vector: %d)\n", v_size);
       }
    total_pts = 0;
    coord_buf = get_some_arb_path_coords(buff_size);
    while(coord_buf->n_pts != 0){
 
       /* grow data_buf if we have to */
-      if(coord_buf->n_pts * vect_size > data_buf_alloc_size){
-         data_buf_alloc_size = coord_buf->n_pts * vect_size;
+      if(coord_buf->n_pts * v_size > data_buf_alloc_size){
+         data_buf_alloc_size = coord_buf->n_pts * v_size;
          data_buf = realloc(data_buf, data_buf_alloc_size * sizeof(*data_buf));
          }
 
       /* get the data */
       if(!get_some_arb_path_data
-         (data_buf, in_dtype, in_is_signed, coord_buf->n_pts, vect_size)){
+         (data_buf, in_dtype, in_is_signed, coord_buf->n_pts, v_size)){
          fprintf(stderr, "failed getting data\n");
          exit(EXIT_FAILURE);
          }
@@ -716,7 +759,7 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
          regrid_point(totals, counts,
                       coord_buf->pts[c].coord[0],
                       coord_buf->pts[c].coord[1],
-                      coord_buf->pts[c].coord[2], vect_size, &data_buf[c * vect_size]);
+                      coord_buf->pts[c].coord[2], v_size, &data_buf[c * v_size]);
          }
 
       /* get the next lot of co-ordinates */
@@ -759,7 +802,7 @@ int read_config_file(char *filename, char *args[])
                if(ichar != 0){
                   tmp[ichar++] = '\0';
                   args[nargs] = (char *)malloc(ichar * sizeof(*args[nargs]));
-                  strncpy(args[nargs], tmp, ichar);
+                  strncpy(args[nargs], tmp, (size_t) ichar);
 
                   ichar = 0;
                   nargs++;
@@ -775,155 +818,34 @@ int read_config_file(char *filename, char *args[])
    return nargs;
    }
 
-/* Get the total number of image dimensions in a minc file */
-int get_minc_ndims(int mincid)
+/* get info from a model file (steps, starts, etc */
+int get_model_file_info(char *dst, char *key, char *nextArg)
 {
-   int      imgid;
-   int      ndims;
+   int      mincid;
+   char    *fname;
 
-   imgid = ncvarid(mincid, MIimage);
-   (void)ncvarinq(mincid, imgid, NULL, NULL, &ndims, NULL, NULL);
+   /* Get pointer to volume definition structure */
+   Volume_Definition *vd = (Volume_Definition *) dst;
 
-   return ndims;
-   }
-
-/* Get a double attribute from a minc file */
-void get_minc_attribute(int mincid, char *varname, char *attname,
-                        int maxvals, double vals[])
-{
-   int      varid;
-   int      old_ncopts;
-   int      att_length;
-
-   if(!mivar_exists(mincid, varname))
-      return;
-   varid = ncvarid(mincid, varname);
-   old_ncopts = ncopts;
-   ncopts = 0;
-   (void)miattget(mincid, varid, attname, NC_DOUBLE, maxvals, vals, &att_length);
-   ncopts = old_ncopts;
-   }
-
-/* Get the mapping from spatial dimension - x, y, z - to file dimensions
-   and vice-versa. */
-void find_minc_spatial_dims(int mincid, int space_to_dim[], int dim_to_space[])
-{
-   int      imgid, dim[MAX_VAR_DIMS];
-   int      idim, ndims, world_index;
-   char     dimname[MAX_NC_NAME];
-
-   /* Set default values */
-   for(idim = 0; idim < 3; idim++)
-      space_to_dim[idim] = -1;
-   for(idim = 0; idim < MAX_VAR_DIMS; idim++)
-      dim_to_space[idim] = -1;
-
-   /* Get the dimension ids for the image variable */
-   imgid = ncvarid(mincid, MIimage);
-   (void)ncvarinq(mincid, imgid, NULL, NULL, &ndims, dim, NULL);
-
-   /* Loop over them to find the spatial ones */
-   for(idim = 0; idim < ndims; idim++){
-
-      /* Get the name and check that this is a spatial dimension */
-      (void)ncdiminq(mincid, dim[idim], dimname, NULL);
-      if((dimname[0] == '\0') || (strcmp(&dimname[1], "space") != 0)){
-         continue;
-         }
-
-      /* Look for the spatial dimensions */
-      switch (dimname[0]){
-      case 'x':
-         world_index = 0;
-         break;
-      case 'y':
-         world_index = 1;
-         break;
-      case 'z':
-         world_index = 2;
-         break;
-      default:
-         world_index = 0;
-         break;
-         }
-      space_to_dim[world_index] = idim;
-      dim_to_space[idim] = world_index;
+   /* Check for following argument */
+   if(nextArg == NULL){
+      (void)fprintf(stderr, "\"%s\" option requires an additional argument\n", key);
+      exit(EXIT_FAILURE);
       }
-   }
+   fname = nextArg;
 
-/* Get the voxel to world transform (for column vectors) */
-void get_minc_voxel_to_world(int mincid,
-                             double voxel_to_world[WORLD_NDIMS][WORLD_NDIMS + 1])
-{
-   int      idim, jdim;
-   double   dircos[WORLD_NDIMS];
-   double   step, start;
-   char    *dimensions[] = { MIxspace, MIyspace, MIzspace };
-
-   /* Zero the matrix */
-   for(idim = 0; idim < WORLD_NDIMS; idim++){
-      for(jdim = 0; jdim < WORLD_NDIMS + 1; jdim++)
-         voxel_to_world[idim][jdim] = 0.0;
+   /* check that the file exists */
+   if(!file_exists(fname)){
+      fprintf(stderr, "Couldn't find -like file %s.\n\n", fname);
+      exit(EXIT_FAILURE);
       }
 
-   for(jdim = 0; jdim < WORLD_NDIMS; jdim++){
+   /* get volume definition from input filename */
+   mincid = miopen(fname, NC_NOWRITE);
+   get_vol_def(mincid, vd);
 
-      /* Set default values */
-      step = 1.0;
-      start = 0.0;
-      for(idim = 0; idim < WORLD_NDIMS; idim++)
-         dircos[idim] = 0.0;
-      dircos[jdim] = 1.0;
+   /* Close the file */
+   miclose(mincid);
 
-      /* Get the attributes */
-      get_minc_attribute(mincid, dimensions[jdim], MIstart, 1, &start);
-      get_minc_attribute(mincid, dimensions[jdim], MIstep, 1, &step);
-      get_minc_attribute(mincid, dimensions[jdim], MIdirection_cosines,
-                         WORLD_NDIMS, dircos);
-      normalize_vector(dircos);
-
-      /* Put them in the matrix */
-      for(idim = 0; idim < WORLD_NDIMS; idim++){
-         voxel_to_world[idim][jdim] = step * dircos[idim];
-         voxel_to_world[idim][WORLD_NDIMS] += start * dircos[idim];
-         }
-      }
-   }
-
-void normalize_vector(double vector[])
-{
-   int      idim;
-   double   magnitude;
-
-   magnitude = 0.0;
-   for(idim = 0; idim < WORLD_NDIMS; idim++){
-      magnitude += (vector[idim] * vector[idim]);
-      }
-   magnitude = sqrt(magnitude);
-   if(magnitude > 0.0){
-      for(idim = 0; idim < WORLD_NDIMS; idim++){
-         vector[idim] /= magnitude;
-         }
-      }
-   }
-
-/* Transforms a coordinate through a linear transform */
-void transform_coord(double out_coord[],
-                     double transform[WORLD_NDIMS][WORLD_NDIMS + 1], double in_coord[])
-{
-   int      idim, jdim;
-   double   homogeneous_coord[WORLD_NDIMS + 1];
-
-   for(idim = 0; idim < WORLD_NDIMS; idim++){
-      homogeneous_coord[idim] = in_coord[idim];
-      }
-   homogeneous_coord[WORLD_NDIMS] = 1.0;
-
-   for(idim = 0; idim < WORLD_NDIMS; idim++){
-      out_coord[idim] = 0.0;
-      for(jdim = 0; jdim < WORLD_NDIMS + 1; jdim++){
-         out_coord[idim] += transform[idim][jdim] * homogeneous_coord[jdim];
-         }
-      }
-
+   return TRUE;
    }
