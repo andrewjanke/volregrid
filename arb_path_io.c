@@ -41,52 +41,103 @@ int init_arb_path(char *coord_fname, char *data_fname)
       fprintf(stdout, "Something is amiss, the initial list is not 0!\n");
       exit(EXIT_FAILURE);
       }
-   
+
    /* open the data file */
    data_fp = fopen(data_fname, "r");
    if(data_fp == NULL){
       fprintf(stderr, "Failed to open the data file %s\n", data_fname);
       return 0;
       }
-    
+
    return 1;
    }
 
 /* finalize the parser */
 void end_arb_path(void)
 {
-
    /* tidy up */
    yyflex_end();
+   
+   /* close the data FP */
+   fclose(data_fp);
    }
 
 /* get some more co-ordinates, returns an empty list when done */
 Coord_list get_some_arb_path_coords(size_t max_buf_size)
 {
-   Coord_list list = coord_lists[0];
-
    /* first empty out the list */
-   if(!set_coord_list_size(list, 0)){
-      fprintf(stderr, "Error clearing out list[%d] %s\n", list->id, list->name);
+   if(!set_coord_list_size(coord_lists[0], 0)){
+      fprintf(stderr, "Error clearing out Default list\n");
+      exit(EXIT_FAILURE);
       }
 
    /* then fill it up again */
-   while (list->n_pts < max_buf_size){
-      if(!yylex()){
+   while (yylex() && coord_lists[0]->n_pts < max_buf_size);
 
-         /* exit early if we are done */
-         fprintf(stdout, "yylex() only got %d coords\n", list->n_pts);
-         return (list);
-         }
-      }
-
-   return (list);
+   return (coord_lists[0]);
    }
 
 /* get some arb_path data, returns NULL on fail                */
-int get_some_arb_path_data(double *data_buf, size_t n_pts, size_t vector_size)
+int get_some_arb_path_data(double *data_buf, nc_type dtype, int is_signed,
+                           size_t n_pts, size_t vector_size)
 {
+   size_t   nread;
+   size_t   elem_size;
+   size_t   n_elem;
+   char    *ptr;
+   int      c;
+
+   /* buffer for data */
+   void    *tmp;
+
+   elem_size = nctypelen(dtype);
+   n_elem = n_pts * vector_size;
    
+   /* allocate space for data buffer */
+   tmp = (void *)malloc(elem_size * n_elem);
+   
+   /* get the data */
+   nread = fread(tmp, elem_size, n_elem, data_fp);
+   if(nread != n_elem){
+      fprintf(stderr, "Premature end of data file: Number read %d != %d\n", nread,
+              n_elem);
+      exit(EXIT_FAILURE);
+      }
+   
+   /* convert data to real */
+   ptr = tmp;
+   for(c = 0; c < n_elem; c++){
+      switch (dtype){
+      case NC_BYTE:
+         if(is_signed)
+            data_buf[c] = (double)*((signed char *)ptr);
+         else
+            data_buf[c] = (double)*((unsigned char *)ptr);
+         break;
+      case NC_SHORT:
+         if(is_signed)
+            data_buf[c] = (double)*((signed short *)ptr);
+         else
+            data_buf[c] = (double)*((unsigned short *)ptr);
+         break;
+      case NC_INT:
+         if(is_signed)
+            data_buf[c] = (double)*((signed int *)ptr);
+         else
+            data_buf[c] = (double)*((unsigned int *)ptr);
+         break;
+      case NC_FLOAT:
+         data_buf[c] = (double)*((float *)ptr);
+         break;
+      case NC_DOUBLE:
+         data_buf[c] = (double)*((double *)ptr);
+         break;
+         }
+      
+      ptr += elem_size;
+      }
+
+   free(tmp);
 
    return 1;
    }
@@ -128,14 +179,14 @@ int new_coord_list(size_t size, char *name)
 /* use realloc to set the size of the point data */
 int set_coord_list_size(Coord_list list, size_t size)
 {
+   list->n_pts = size;
+   
    /* only grow a list, never shrink */
    if(size > list->alloc_size){
       list->alloc_size = size;
       list->pts = (Coord *) realloc(list->pts, list->alloc_size * sizeof(*list->pts));
       }
-
-   list->n_pts = size;
-
+   
    return 1;
    }
 
@@ -171,6 +222,7 @@ int add_coord_to_list(int list_id, double x, double y, double z)
 {
    Coord_list list = coord_lists[list_id];
    int      c_pt = list->n_pts;
+   register int      i;
 
    set_coord_list_size(list, list->n_pts + 1);
 
@@ -182,9 +234,6 @@ int add_coord_to_list(int list_id, double x, double y, double z)
       list->pts[c_pt].coord[2] = z;
       }
    else{
-      int      i;
-
-      fprintf(stdout, "Multiplying");
       for(i = 0; i < 3; i++){
          list->pts[c_pt].coord[i] =
             (aff_M[i][0] * x) + (aff_M[i][1] * y) + (aff_M[i][2] * z) + aff_M[i][3];
@@ -199,6 +248,7 @@ int add_rcoord_to_list(int list_id, double x, double y, double z, double rep)
    Coord_list list = coord_lists[list_id];
    int      c_pt = list->n_pts;
    int      c;
+   register int i;
 
    set_coord_list_size(list, c_pt + rep);
 
@@ -211,11 +261,7 @@ int add_rcoord_to_list(int list_id, double x, double y, double z, double rep)
          }
       }
    else{
-      int      i;
-
-      fprintf(stdout, "Multiplying");
       for(c = 0; c < rep; c++){
-
          for(i = 0; i < 3; i++){
             list->pts[c_pt + c].coord[i] = list->pts[c_pt + c - 1].coord[i] +
                (aff_M[i][0] * x) + (aff_M[i][1] * y) + (aff_M[i][2] * z) + aff_M[i][3];

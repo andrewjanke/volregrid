@@ -17,6 +17,7 @@
 /*                                                                           */
 /* Wed Dec 11 14:57:44 EST 2002 - inital version for sodium k-space data     */
 /* Wed Dec 18 09:20:02 EST 2002 - added lex parser for arbitrary path data   */
+/* Fri Jan 10 15:21:30 EST 2003 - First working version                      */
 
 
 #include <float.h>
@@ -25,26 +26,41 @@
 #include <volume_io.h>
 #include <ParseArgv.h>
 #include <time_stamp.h>
+#include <gsl/gsl_sf_bessel.h>
 #include "arb_path_io.h"
 
 #define NO_VALUE DBL_MAX               /* Constant to flag fact that value not set */
 #define DEF_BOOL -1
-#define X_IDX 0
+#define X_IDX 2
 #define Y_IDX 1
-#define Z_IDX 2
+#define Z_IDX 0
 #define V_IDX 3
+
+#define SQR(x) ((x)*(x))
+#define SQR3(x) ((x)*(x)*(x))
+
+typedef enum { UNSPECIFIED_FUNC = 0, KAISERBESSEL_FUNC, GAUSSIAN_FUNC, NEAREST_FUNC
+} Regrid_op;
 
 /* function prototypes */
 int      read_config_file(char *filename, char *args[]);
+void     regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size,
+                         Volume * out_vol);
 
 int      verbose = FALSE;
 int      debug = FALSE;
 int      clobber = FALSE;
 int      regrid_dim = 3;
-char    *arb_path_cfg_fn = NULL;
-int      arb_path_buff_size = 100;
 nc_type  in_dtype = NC_FLOAT;
 int      in_is_signed = FALSE;
+
+/* arb path variables */
+char    *ap_coord_fn = NULL;
+int      ap_buff_size = 2048;
+double   ap_window_radius = 1.0;
+
+Regrid_op regrid_type = GAUSSIAN_FUNC;
+double   ap_sigma = 1.0;
 
 /* output file parameters */
 char    *out_config_fn = NULL;
@@ -55,11 +71,6 @@ double   real_range[2] = { 0, 1 };
 double   out_start[MAX_VAR_DIMS] = { -50, -50, -50 };
 double   out_step[MAX_VAR_DIMS] = { 1, 1, 1 };
 int      out_length[MAX_VAR_DIMS] = { 100, 100, 100, 1 };
-double   out_dircos[3][3] = {
-   1, 0, 0,
-   0, 1, 0,
-   0, 0, 1
-};
 
 static ArgvInfo argTable[] = {
    {"-verbose", ARGV_CONSTANT, (char *)TRUE, (char *)&verbose,
@@ -127,23 +138,29 @@ static ArgvInfo argTable[] = {
     "Number of samples in z dimension."},
    {"-vector_length", ARGV_INT, (char *)1, (char *)&out_length[V_IDX],
     "Number of samples in the vector dimension."},
-   {"-xdircos", ARGV_FLOAT, (char *)3, (char *)out_dircos[X_IDX],
-    "Direction cosines for x dimension."},
-   {"-ydircos", ARGV_FLOAT, (char *)3, (char *)out_dircos[Y_IDX],
-    "Direction cosines for y dimension."},
-   {"-zdircos", ARGV_FLOAT, (char *)3, (char *)out_dircos[Z_IDX],
-    "Direction cosines for z dimension."},
 
 
    {NULL, ARGV_HELP, NULL, NULL, "\nRegridding options"},
    {"-2D", ARGV_CONSTANT, (char *)2, (char *)&regrid_dim,
     "Regrid slice by slice (Default 3D)."},
 
-   {"-arb_path", ARGV_STRING, (char *)1, (char *)&arb_path_cfg_fn,
+   {NULL, ARGV_HELP, NULL, NULL, "\nArbitrary path Regridding options"},
+   {"-arb_path", ARGV_STRING, (char *)1, (char *)&ap_coord_fn,
     "Regrid data using an arbitrary path from the input filename"},
-   {"-arb_path_coord_buffer", ARGV_INT, (char *)1, (char *)&arb_path_buff_size,
+   {"-arb_path_coord_buffer", ARGV_INT, (char *)1, (char *)&ap_buff_size,
     "Size of arbitrary path co-ordinate buffer"},
+   {"-ap_window_radius", ARGV_FLOAT, (char *)1, (char *)&ap_window_radius,
+    "Defines the Window radius for regridding (in mm)."},
 
+   {"-kaiser_bessel", ARGV_CONSTANT, (char *)KAISERBESSEL_FUNC, (char *)&regrid_type,
+    "Use a Kaiser-Bessel convolution kernel for the reconstruction."},
+   {"-gaussian", ARGV_CONSTANT, (char *)GAUSSIAN_FUNC, (char *)&regrid_type,
+    "Use a Gaussian convolution kernel for the reconstruction."},
+   {"-nearest", ARGV_CONSTANT, (char *)NEAREST_FUNC, (char *)&regrid_type,
+    "Use nearest neighbour reconstruction."},
+
+   {"-sigma", ARGV_FLOAT, (char *)1, (char *)&ap_sigma,
+    "Value of sigma"},
 
    {NULL, ARGV_HELP, NULL, NULL, ""},
    {NULL, ARGV_END, NULL, NULL, NULL}
@@ -196,6 +213,12 @@ main(int argc, char *argv[])
       exit(EXIT_FAILURE);
       }
 
+   /* check sigma */
+   if(ap_sigma <= 0){
+      fprintf(stderr, "%s: -sigma must be greater than 0.\n\n", argv[0]);
+      exit(EXIT_FAILURE);
+      }
+
 
    /* read in the output file config from a file is specified */
    if(out_config_fn != NULL){
@@ -222,9 +245,8 @@ main(int argc, char *argv[])
 
    /* print some pretty output */
    if(verbose){
-
       fprintf(stdout, " | Input data:      %s\n", in_fn);
-      fprintf(stdout, " | Arb path:        %s\n", arb_path_cfg_fn);
+      fprintf(stdout, " | Arb path:        %s\n", ap_coord_fn);
       fprintf(stdout, " | Valid Range:    [%8.3f:%8.3f]\n", valid_range[0],
               valid_range[1]);
       fprintf(stdout, " | Real Range:     [%8.3f:%8.3f]\n", real_range[0], real_range[1]);
@@ -233,56 +255,8 @@ main(int argc, char *argv[])
 
 
    /* arbitrary path */
-   if(arb_path_cfg_fn != NULL){
-      Coord_list coord_buf;
-      double  *data_buf = NULL;
-      size_t   data_buf_alloc_size = 0;
-
-      /* check for the config file */
-      if(!file_exists(arb_path_cfg_fn)){
-         fprintf(stderr, "%s: Couldn't find config file %s.\n\n", argv[0],
-                 arb_path_cfg_fn);
-         exit(EXIT_FAILURE);
-         }
-
-      /* initialise the parser with the config file */
-      if(!init_arb_path(arb_path_cfg_fn, in_fn)){
-         fprintf(stderr, "%s: Failed to init arb_path, this isn't good\n", argv[0]);
-         exit(EXIT_FAILURE);
-         }
-
-      /* get some co-ordinates */
-      coord_buf = get_some_arb_path_coords(arb_path_buff_size);
-      while(coord_buf->n_pts != 0){
-         
-      //   print_coord_list(coord_buf);
-         fprintf(stdout, "Got %d co-ords\n", coord_buf->n_pts);
-
-         /* grow data_buf if we have to */
-         if(coord_buf->n_pts > data_buf_alloc_size){
-            data_buf_alloc_size = coord_buf->n_pts;
-            data_buf = (double *)realloc(data_buf, data_buf_alloc_size * out_length[V_IDX]);
-            fprintf(stdout, "Allocated %d x %d = %d bytes to data_buf\n", data_buf_alloc_size,
-                 out_length[V_IDX], data_buf_alloc_size * out_length[V_IDX]);
-            }
-         
-         /* get the data */
-         if(!get_some_arb_path_data(data_buf, coord_buf->n_pts, out_length[V_IDX])){
-            fprintf(stderr, "failed getting data\n");
-            }
-      
-
-         /* regrid (do the nasty) */
-//      if(regrid_arbitrary_path(out_vol, in_fn, path_data) != OK){
-//         print_error("%s: Problems regridding data\n", argv[0]);
-//         exit(EXIT_FAILURE);
-//         }
-         
-         /* get the next lot of co-ordinates */
-         coord_buf = get_some_arb_path_coords(arb_path_buff_size);
-         }
-
-      end_arb_path();
+   if(ap_coord_fn != NULL){
+      regrid_arb_path(ap_coord_fn, in_fn, ap_buff_size, out_length[V_IDX], &out_vol);
       }
 
    /* output the result */
@@ -300,7 +274,209 @@ main(int argc, char *argv[])
 
 
 /* regrid a volume with an arbitrary path */
+void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size,
+                     Volume * out_vol)
+{
+   Coord_list coord_buf;
+   double  *data_buf = NULL;
+   size_t   data_buf_alloc_size = 0;
+   int      sizes[MAX_VAR_DIMS];
+   Real     steps[MAX_VAR_DIMS];
+   Real     starts[MAX_VAR_DIMS];
+   int      n_start[3];
+   int      n_stop[3];
+   int      c;
+   int      i, j, k, v;
+   Volume   counts;
+   double   value;
+   double   euc_dist;
+   double   euc[3];
+   double   weight;
+   double   c_pos[3];
+   long     num_missed;
 
+   int      perm[3] = { X_IDX, Y_IDX, Z_IDX }; /* permutation array for IDX's */
+
+   get_volume_sizes(*out_vol, sizes);
+   get_volume_separations(*out_vol, steps);
+   get_volume_starts(*out_vol, starts);
+
+   /* check for the config file */
+   if(!file_exists(coord_fn)){
+      fprintf(stderr, "Couldn't find config file %s.\n\n", coord_fn);
+      exit(EXIT_FAILURE);
+      }
+
+   /* initialise the parser with the config file */
+   if(!init_arb_path(coord_fn, data_fn)){
+      fprintf(stderr, "Failed to init arb_path, this isn't good\n");
+      exit(EXIT_FAILURE);
+      }
+
+   if(vect_size == 0){
+      fprintf(stderr, "vector_size is 0! something is amiss\n");
+      exit(EXIT_FAILURE);
+      }
+
+   set_volume_real_range(*out_vol, 0, 1);
+   set_volume_voxel_range(*out_vol, 0, 1);
+
+   /* create the "counts" volume */
+   counts = copy_volume_definition(*out_vol, MI_ORIGINAL_TYPE, 0, 0, 0);
+
+   /* initialize both of them */
+   for(i = sizes[X_IDX]; i--;){
+      for(j = sizes[Y_IDX]; j--;){
+         for(k = sizes[Z_IDX]; k--;){
+            set_volume_real_value(counts, k, j, i, 0, 0, 0.0);
+            for(v = vect_size; v--;){
+               set_volume_real_value(*out_vol, k, j, i, v, 0, 0.0);
+               }
+            }
+         }
+      }
+
+   /* get some co-ordinates */
+   coord_buf = get_some_arb_path_coords(buff_size);
+   while (coord_buf->n_pts != 0){
+
+      /* grow data_buf if we have to */
+      if(coord_buf->n_pts * vect_size > data_buf_alloc_size){
+         data_buf_alloc_size = coord_buf->n_pts * vect_size;
+         data_buf = realloc(data_buf, data_buf_alloc_size * sizeof(*data_buf));
+         }
+
+      /* get the data */
+      if(!get_some_arb_path_data
+          (data_buf, in_dtype, in_is_signed, coord_buf->n_pts, vect_size)){
+         fprintf(stderr, "failed getting data\n");
+         exit(EXIT_FAILURE);
+         }
+
+      fprintf(stdout, "Got %d co-ords - vect: %d\n", coord_buf->n_pts, vect_size);
+
+      /* regrid (do the nasty) */
+      for(c = 0; c < coord_buf->n_pts; c++){
+
+         /* figure out the neighbouring voxels start and stop (in voxel co-ordinates) */
+         for(i = 0; i < 3; i++){
+            n_start[i] = rint((coord_buf->pts[c].coord[i] -
+                               starts[perm[i]] - ap_window_radius) / steps[perm[i]]);
+            n_stop[i] = n_start[i] + rint((ap_window_radius * 2) / steps[perm[i]]);
+
+            /* check that we aren't off the edge */
+            if(n_start[i] < 0){
+               n_start[i] = 0;
+               }
+            if(n_stop[i] > sizes[perm[i]]){
+               n_stop[i] = sizes[perm[i]];
+               }
+            }
+
+         /* loop over the neighbours */
+         c_pos[0] = starts[perm[0]] + (n_start[0] * steps[perm[0]]);
+         for(i = n_start[0]; i < n_stop[0]; i++){
+
+            c_pos[1] = starts[perm[1]] + (n_start[1] * steps[perm[1]]);
+            for(j = n_start[1]; j < n_stop[1]; j++){
+
+               c_pos[2] = starts[perm[2]] + (n_start[2] * steps[perm[2]]);
+               for(k = n_start[2]; k < n_stop[2]; k++){
+
+                  /* calc euclidean distance to current point */
+                  euc[0] = fabs(c_pos[0] - coord_buf->pts[c].coord[0]);
+                  euc[1] = fabs(c_pos[1] - coord_buf->pts[c].coord[1]);
+                  euc[2] = fabs(c_pos[2] - coord_buf->pts[c].coord[2]);
+                  euc_dist = sqrt(SQR(euc[0]) + SQR(euc[1]) + SQR(euc[2]));
+
+                  if(euc_dist <= ap_window_radius){
+
+                     /* calculate the weighting factor */
+                     switch (regrid_type){
+                     default:
+                        fprintf(stderr, "Erk! unknown regrid_type. File: %s Line: %d\n",
+                                __FILE__, __LINE__);
+                        exit(EXIT_FAILURE);
+                        break;
+
+                     case NEAREST_FUNC:
+                        fprintf(stderr, "Erk! -nearest is not implemented yet\n");
+                        exit(EXIT_FAILURE);
+                        break;
+
+                     case KAISERBESSEL_FUNC:
+                        weight =
+                           gsl_sf_bessel_I0(ap_sigma *
+                                            sqrt(1 - SQR(euc[0] / ap_window_radius))) *
+                           gsl_sf_bessel_I0(ap_sigma *
+                                            sqrt(1 - SQR(euc[1] / ap_window_radius))) *
+                           gsl_sf_bessel_I0(ap_sigma *
+                                            sqrt(1 - SQR(euc[2] / ap_window_radius))) /
+                           SQR3(ap_window_radius);
+
+                        break;
+
+                     case GAUSSIAN_FUNC:
+                        weight = exp(-SQR(euc_dist) / SQR(ap_sigma));
+                        break;
+                        }
+
+                     /* set data values */
+                     for(v = 0; v < vect_size; v++){
+                        value = get_volume_real_value(*out_vol, k, j, i, v, 0);
+                        set_volume_real_value(*out_vol, k, j, i, v, 0,
+                                              value +
+                                              (data_buf[(c * vect_size) + v] * weight));
+                        }
+
+                     /* increment count value */
+                     value = get_volume_real_value(counts, k, j, i, 0, 0);
+                     set_volume_real_value(counts, k, j, i, 0, 0, value + weight);
+                     }
+
+                  c_pos[2] += steps[perm[2]];
+                  }
+
+               c_pos[1] += steps[perm[1]];
+               }
+
+            c_pos[0] += steps[perm[0]];
+            }
+
+         }
+
+      /* get the next lot of co-ordinates */
+      coord_buf = get_some_arb_path_coords(buff_size);
+      }
+
+   /* divide out/counts volume for result */
+   num_missed = 0;
+   fprintf(stdout, "Dividing through\n");
+   for(i = sizes[X_IDX]; i--;){
+      for(j = sizes[Y_IDX]; j--;){
+         for(k = sizes[Z_IDX]; k--;){
+            value = get_volume_real_value(counts, k, j, i, 0, 0);
+            if(value != 0){
+               for(v = vect_size; v--;){
+                  set_volume_real_value(*out_vol, k, j, i, v, 0,
+                                        get_volume_real_value(*out_vol, k, j, i, v,
+                                                              0) / value);
+                  }
+               }
+            else{
+               num_missed++;
+               }
+            }
+         }
+      }
+
+   if(num_missed > 0){
+      fprintf(stdout,
+              "Window radius is possibly too small, did not put any data in %d voxels\n",
+              num_missed);
+      }
+   end_arb_path();
+   }
 
 
 /* convert input file to equiv C/L, return number of args read */

@@ -47,32 +47,26 @@ RCOORD    "@["{COORD}"]"
 <*>\n                  { line_num++; }  /* count lines */
 
  /* co-ordinates */
-{COORD}                { printf("***| Coord  ");
-                         if(get_coord_from_str(yytext, &x, &y, &z) && 
+{COORD}                { if(get_coord_from_str(yytext, &x, &y, &z) && 
                             add_coord_to_list(0, x, y, z)){
-                            printf("  -- %g %g %g\n", x, y, z);      
                             return 1;                                
                             }                                        
                          else{                                       
                             yyerror();                               
                             }                                        
                          }                                           
-{RCOORD}               { printf("***| RCoor  ");
-                         yytext+=2;                                         
+{RCOORD}               { yytext+=2;                                         
                          if(get_coord_from_str(yytext, &x, &y, &z) &&       
-                            add_rcoord_to_list(0, x, y, z, 1)){             
-                            printf("  -- %g %g %g\n", x, y, z);             
+                            add_rcoord_to_list(0, x, y, z, 1)){
                             return 1;                                       
                             }                                               
                          else{                                              
                             yyerror();                                      
                             }                                               
                          }                                                  
-{RCOORD}\*{REAL}       { printf("***| RRCoo   %s", yytext);
-                         yytext+=2;                                                          
+{RCOORD}\*{REAL}       { yytext+=2;                                                          
                          if(get_coord_from_str(yytext, &x, &y, &z) &&                        
-                            add_rcoord_to_list(0, x, y, z, get_reps_from_str(yytext))){      
-                            printf("  -- %g %g %g\n", x, y, z);                              
+                            add_rcoord_to_list(0, x, y, z, get_reps_from_str(yytext))){
                             return 1;                                                        
                             }                                                                
                          else{                                                               

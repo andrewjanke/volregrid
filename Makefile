@@ -6,11 +6,11 @@ CC=cc
 
 OPTIONS = -g3 -fullwarn -O3
 INCLUDES = -I/usr/local/include
-CFLAGS = $(OPTIONS) $(INCLUDES)
+CFLAGS = $(OPTIONS) $(INCLUDES) `gsl-config --cflags`
 
 LDINCLUDES = -L/usr/local/lib32
 LDLIBS = -lvolume_io -lminc -lnetcdf -lm
-LDOPTS = $(LDINCLUDES) $(LDLIBS)
+LDOPTS = $(LDINCLUDES) $(LDLIBS) `gsl-config --libs`
 
 
 all: $(PROGS) 
