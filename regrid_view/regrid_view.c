@@ -22,6 +22,8 @@
 #include <sys/types.h>
 #include <malloc.h>
 #include <ParseArgv.h>
+#include <math.h>
+#include <float.h>
 #include "arb_path_io.h"
 #include "trackball.h"
 

@@ -2,14 +2,13 @@ PROGS=regrid_view
 OBJS=$(PROGS:=.o) ../arb_path_io.o ../lex.o trackball.o
 
 LEX=flex
-CC=cc
 
-OPTIONS = -g3 -fullwarn -O3
-INCLUDES = -I/usr/local/include -I. -I../
+OPTIONS = -g3 -O3
+INCLUDES = -I/usr/local/mni/include -I. -I../
 CFLAGS = $(OPTIONS) $(INCLUDES)
 
-LDINCLUDES = -L/usr/local/lib32
-LDLIBS = -lm -lminc -lnetcdf -lglut -lGL -lGLU -lX11 -lXext -lXmu
+LDINCLUDES = -L/usr/local/mni/lib -L/usr/X11R6/lib
+LDLIBS = -lm -lminc -lnetcdf -lglut -lGL -lGLU -lpthread -lX11 -lXext -lXmu
 LDOPTS = $(LDINCLUDES) $(LDLIBS)
 
 
