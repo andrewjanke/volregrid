@@ -19,12 +19,14 @@
 /* Wed Dec 18 09:20:02 EST 2002 - added lex parser for arbitrary path data   */
 /* Fri Jan 10 15:21:30 EST 2003 - First working version                      */
 
+#include <math.h>
 #include <float.h>
 #include <sys/stat.h>
 #include <ctype.h>
 #include <volume_io.h>
 #include <ParseArgv.h>
 #include <time_stamp.h>
+#include <voxel_loop.h>
 #include <gsl/gsl_sf_bessel.h>
 #include "arb_path_io.h"
 
@@ -36,6 +38,8 @@
 #define Y_IDX 1
 #define Z_IDX 0
 #define V_IDX 3
+
+#define WORLD_NDIMS 3
 
 char    *std_dimorder[] = { MIzspace, MIyspace, MIxspace };
 char    *std_dimorder_v[] = { MIzspace, MIyspace, MIxspace, MIvector_dimension };
@@ -51,20 +55,35 @@ typedef enum {
 int      read_config_file(char *filename, char *args[]);
 void     scale_volume(Volume * vol, double o_min, double o_max, double min, double max);
 void     regrid_point(Volume * totals, Volume * counts,
-                  double x, double y, double z, int vect_size, double *data_buf);
+                      double x, double y, double z, int vect_size, double *data_buf);
 void     regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
                          Volume * totals, Volume * counts, int vect_size);
-void     regrid_minc(Volume * in_vol, Volume * totals, Volume * counts, int vect_size);
+void     regrid_loop(void *caller_data, long num_voxels,
+                     int input_num_buffers, int input_vector_length,
+                     double *input_data[],
+                     int output_num_buffers, int output_vector_length,
+                     double *output_data[], Loop_Info * loop_info);
+void     regrid_minc(char *in_fn, Volume * totals, Volume * counts, int vect_size);
+void     get_minc_attribute(int mincid, char *varname, char *attname,
+                            int maxvals, double vals[]);
+int      get_minc_ndims(int mincid);
+void     find_minc_spatial_dims(int mincid, int space_to_dim[], int dim_to_space[]);
+void     get_minc_voxel_to_world(int mincid,
+                                 double voxel_to_world[WORLD_NDIMS][WORLD_NDIMS + 1]);
+void     normalize_vector(double vector[]);
+void     transform_coord(double out_coord[],
+                         double transform[WORLD_NDIMS][WORLD_NDIMS + 1],
+                         double in_coord[]);
 
 /* argument variables and table */
 static int verbose = FALSE;
 static int clobber = FALSE;
 static nc_type in_dtype = NC_FLOAT;
 static int in_is_signed = FALSE;
+static int max_buffer_size_in_kb = 4 * 1024;
 
 /* arb path variables */
 char    *ap_coord_fn = NULL;
-int      ap_buff_size = 2048;
 
 /* regridding options */
 double   regrid_radius = 2.0;
@@ -85,6 +104,8 @@ static ArgvInfo argTable[] = {
     "Print out extra information."},
    {"-clobber", ARGV_CONSTANT, (char *)TRUE, (char *)&clobber,
     "Overwrite existing files."},
+   {"-max_buffer_size_in_kb", ARGV_INT, (char *)1, (char *)&max_buffer_size_in_kb,
+    "maximum size of internal buffers."},
 
    {NULL, ARGV_HELP, NULL, NULL, "\nRaw Infile Options"},
    {"-byte", ARGV_CONSTANT, (char *)NC_BYTE, (char *)&in_dtype,
@@ -157,8 +178,6 @@ static ArgvInfo argTable[] = {
    {NULL, ARGV_HELP, NULL, NULL, "\nArbitrary path Regridding options"},
    {"-arb_path", ARGV_STRING, (char *)1, (char *)&ap_coord_fn,
     "<file> Regrid data using an arbitrary path from the input file"},
-   {"-arb_path_coord_buffer", ARGV_INT, (char *)1, (char *)&ap_buff_size,
-    "Size of arbitrary path co-ordinate buffer"},
 
    {NULL, ARGV_HELP, NULL, NULL, ""},
    {NULL, ARGV_END, NULL, NULL, NULL}
@@ -173,7 +192,6 @@ int main(int argc, char *argv[])
    progress_struct progress;
    Status   status;
    Volume   totals, counts;
-   Volume   tmp;
    int      i, j, k, v;
    double   min, max;
    long     num_missed;
@@ -185,11 +203,12 @@ int main(int argc, char *argv[])
    /* get args */
    if(ParseArgv(&argc, argv, argTable, 0) || (argc < 3)){
       fprintf(stderr, "\nUsage: %s [options] <infile.raw> <out.mnc>\n", argv[0]);
-      fprintf(stderr, "       %s [options] <in1.mnc> [<in2.mnc> [...]] <out.mnc>\n", argv[0]);
+      fprintf(stderr, "       %s [options] <in1.mnc> [<in2.mnc> [...]] <out.mnc>\n",
+              argv[0]);
       fprintf(stderr, "       %s [-help]\n\n", argv[0]);
       exit(EXIT_FAILURE);
       }
-   
+
    /* get file names */
    n_infiles = argc - 2;
    infiles = (char **)malloc(sizeof(char *) * n_infiles);
@@ -254,8 +273,7 @@ int main(int argc, char *argv[])
    alloc_volume_data(totals);
 
    /* create the "counts" volume */
-   counts = create_volume(3, std_dimorder,
-                          out_dtype, out_is_signed, 0.0, 0.0);
+   counts = create_volume(3, std_dimorder, out_dtype, out_is_signed, 0.0, 0.0);
    set_volume_sizes(counts, out_length);
    set_volume_starts(counts, out_start);
    set_volume_separations(counts, out_step);
@@ -273,15 +291,15 @@ int main(int argc, char *argv[])
          }
       }
 
-   
    /* if regridding via an arbitrary path */
    if(ap_coord_fn != NULL){
-      
+
       if(n_infiles > 1){
-         fprintf(stderr, "%s: arb_path only works for one input file (so far).\n\n", argv[0]);
+         fprintf(stderr, "%s: arb_path only works for one input file (so far).\n\n",
+                 argv[0]);
          exit(EXIT_FAILURE);
          }
-      
+
       /* print some pretty output */
       if(verbose){
          fprintf(stdout, " | Input data:      %s\n", infiles[0]);
@@ -289,30 +307,23 @@ int main(int argc, char *argv[])
          fprintf(stdout, " | Output range:    [%g:%g]\n", out_range[0], out_range[1]);
          fprintf(stdout, " | Output file:     %s\n", out_fn);
          }
-      
-      regrid_arb_path(ap_coord_fn, infiles[0], ap_buff_size, &totals, &counts, out_length[V_IDX]);
+
+      regrid_arb_path(ap_coord_fn, infiles[0], max_buffer_size_in_kb, &totals, &counts,
+                      out_length[V_IDX]);
       }
-   
-   
+
    /* else if regridding via a series of input minc file(s) */
-   else{
-      int c;
-      
-      for(c=0; c<n_infiles; c++){
-      
+   else {
+      int      c;
+
+      for(c = 0; c < n_infiles; c++){
+
          /* print some pretty output */
          if(verbose){
             fprintf(stdout, " | Input file:      %s\n", infiles[c]);
             }
-         
-         if(input_volume(infiles[c], 
-                         3, std_dimorder,
-                         NC_UNSPECIFIED, TRUE, 0.0, 0.0, TRUE, &tmp, NULL) != 0){
-            fprintf(stderr, "%s: Error reading input volume (%s)\n\n", argv[0], infiles[c]);
-            exit(EXIT_FAILURE);
-            }
-         
-         regrid_minc(&tmp, &totals, &counts, out_length[V_IDX]);
+
+         regrid_minc(infiles[c], &totals, &counts, out_length[V_IDX]);
          }
       }
 
@@ -381,8 +392,7 @@ int main(int argc, char *argv[])
    if(status != OK){
       print_error("Problems outputing: %s", out_fn);
       }
-   
-   delete_volume(tmp);
+
    delete_volume(totals);
    delete_volume(counts);
 
@@ -441,48 +451,99 @@ void scale_volume(Volume * vol, double o_min, double o_max, double min, double m
    set_volume_real_range(*vol, min, max);
    }
 
-/* regrid using a minc volume */
-void regrid_minc(Volume * in_vol, Volume * totals, Volume * counts, int vect_size)
+/* struct for regriding using a minc volume */
+typedef struct {
+
+   int      file_ndims;
+   int      space_to_dim[WORLD_NDIMS];
+   int      dim_to_space[MAX_VAR_DIMS];
+   double   voxel_to_world[WORLD_NDIMS][WORLD_NDIMS + 1];
+
+   double  *data_buf;
+
+   Volume  *totals;
+   Volume  *counts;
+
+   } Loop_Data;
+
+/* voxel loop function for regrid_minc */
+void regrid_loop(void *caller_data, long num_voxels,
+                 int input_num_buffers, int input_vector_length,
+                 double *input_data[],
+                 int output_num_buffers, int output_vector_length,
+                 double *output_data[], Loop_Info * loop_info)
 {
-   int      sizes[MAX_VAR_DIMS];
-   int      i, j, k, v;
-   double   wx, wy, wz;
-   Real     coord[3];
-   double   *data_buf;
-   progress_struct progress;
-   
-   /* alloc space for data_buf */
-   data_buf = (double*)malloc(sizeof(double) * vect_size);
-   
-   get_volume_sizes(*in_vol, sizes);
-   initialize_progress_report(&progress, FALSE, out_length[Z_IDX], "Regridding");
-   for(k = sizes[Z_IDX]; k--;){
-      for(j = sizes[Y_IDX]; j--;){
-         for(i = sizes[X_IDX]; i--;){
-            
-            /* set up co-ordinate */
-            coord[0] = k;
-            coord[1] = j;
-            coord[2] = i;
-            convert_voxel_to_world(*in_vol, coord, &wx, &wy, &wz);
-           
-            /* get data */
-            for(v = 0; v < vect_size; v++){
-               data_buf[v] = get_volume_real_value(*in_vol, k, j, i, v, 0);
-               }
-            
-            regrid_point(totals, counts,
-                         wx, wy, wz,
-                         vect_size, &data_buf[0]);
-            }
+   long     ivox;
+   long     index[MAX_VAR_DIMS];
+   int      v, idim;
+   double   voxel_coord[WORLD_NDIMS];
+   double   world_coord[WORLD_NDIMS];
+
+   /* get pointer to loop data */
+   Loop_Data *ld = (Loop_Data *) caller_data;
+
+   /* shut the compiler up - yes I _know_ I don't use these */
+//   (void)output_num_buffers;
+//   (void)output_vector_length;
+//   (void)output_data;
+//   (void)loop_info;
+
+   /* for each (vector) voxel */
+   for(ivox = 0; ivox < num_voxels * (long)input_vector_length;
+       ivox += (long)input_vector_length){
+
+      /* figure out where we are in space */
+      get_info_voxel_index(loop_info, ivox, ld->file_ndims, index);
+
+      /* convert voxel index to world co-ordinate */
+      for(idim = 0; idim < WORLD_NDIMS; idim++){
+         voxel_coord[idim] = index[ld->space_to_dim[idim]];
          }
-      fprintf(stdout, "[%d] \n", k);
-      update_progress_report(&progress, k + 1);
+      transform_coord(&world_coord[0], ld->voxel_to_world, &voxel_coord[0]);
+
+      /* get the data */
+      for(v = 0; v < input_vector_length; v++){
+         ld->data_buf[v] = input_data[0][(ivox * (long)input_vector_length) + (long)v];
+         }
+
+      /* then regrid the point */
+      regrid_point(ld->totals, ld->counts,
+                   world_coord[0], world_coord[1], world_coord[2],
+                   input_vector_length, ld->data_buf);
       }
-   terminate_progress_report(&progress);
-   
+
+   return;
+   }
+
+/* regrid using a minc volume */
+void regrid_minc(char *in_fn, Volume * totals, Volume * counts, int vect_size)
+{
+   Loop_Data ld;
+   Loop_Options *loop_opt;
+   int      mincid;
+
+   /* Open the file to get some information */
+   mincid = miopen(in_fn, NC_NOWRITE);
+   ld.file_ndims = get_minc_ndims(mincid);
+   find_minc_spatial_dims(mincid, ld.space_to_dim, ld.dim_to_space);
+   get_minc_voxel_to_world(mincid, ld.voxel_to_world);
+
+   /* alloc space for data_buf */
+   ld.data_buf = (double *)malloc(sizeof(double) * vect_size);
+
+   ld.totals = totals;
+   ld.counts = counts;
+
+   /* set up and do voxel_loop */
+   loop_opt = create_loop_options();
+   set_loop_first_input_mincid(loop_opt, mincid);
+   set_loop_verbose(loop_opt, verbose);
+   set_loop_buffer_size(loop_opt, (long)1024 * max_buffer_size_in_kb);
+   voxel_loop(1, &in_fn, 0, NULL, NULL, loop_opt, regrid_loop, (void *)&ld);
+   free_loop_options(loop_opt);
+
    /* tidy up */
-   free(data_buf);
+   free(ld.data_buf);
    }
 
 /* regrid a point in a file using the input co-ordinate and data */
@@ -514,7 +575,8 @@ void regrid_point(Volume * totals, Volume * counts,
 
    /* figure out the neighbouring voxels start and stop (in voxel co-ordinates) */
    for(i = 0; i < 3; i++){
-      start_idx[i] = rint((coord[i] - starts[perm[i]] - regrid_radius) / steps[perm[i]]);
+      start_idx[i] =
+         (int)rint((coord[i] - starts[perm[i]] - regrid_radius) / steps[perm[i]]);
       stop_idx[i] = start_idx[i] + rint((regrid_radius * 2) / steps[perm[i]]);
 
       /* check that we aren't off the edge */
@@ -654,8 +716,7 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
          regrid_point(totals, counts,
                       coord_buf->pts[c].coord[0],
                       coord_buf->pts[c].coord[1],
-                      coord_buf->pts[c].coord[2],
-                      vect_size, &data_buf[c * vect_size]);
+                      coord_buf->pts[c].coord[2], vect_size, &data_buf[c * vect_size]);
          }
 
       /* get the next lot of co-ordinates */
@@ -712,4 +773,157 @@ int read_config_file(char *filename, char *args[])
       }
    fclose(fp);
    return nargs;
+   }
+
+/* Get the total number of image dimensions in a minc file */
+int get_minc_ndims(int mincid)
+{
+   int      imgid;
+   int      ndims;
+
+   imgid = ncvarid(mincid, MIimage);
+   (void)ncvarinq(mincid, imgid, NULL, NULL, &ndims, NULL, NULL);
+
+   return ndims;
+   }
+
+/* Get a double attribute from a minc file */
+void get_minc_attribute(int mincid, char *varname, char *attname,
+                        int maxvals, double vals[])
+{
+   int      varid;
+   int      old_ncopts;
+   int      att_length;
+
+   if(!mivar_exists(mincid, varname))
+      return;
+   varid = ncvarid(mincid, varname);
+   old_ncopts = ncopts;
+   ncopts = 0;
+   (void)miattget(mincid, varid, attname, NC_DOUBLE, maxvals, vals, &att_length);
+   ncopts = old_ncopts;
+   }
+
+/* Get the mapping from spatial dimension - x, y, z - to file dimensions
+   and vice-versa. */
+void find_minc_spatial_dims(int mincid, int space_to_dim[], int dim_to_space[])
+{
+   int      imgid, dim[MAX_VAR_DIMS];
+   int      idim, ndims, world_index;
+   char     dimname[MAX_NC_NAME];
+
+   /* Set default values */
+   for(idim = 0; idim < 3; idim++)
+      space_to_dim[idim] = -1;
+   for(idim = 0; idim < MAX_VAR_DIMS; idim++)
+      dim_to_space[idim] = -1;
+
+   /* Get the dimension ids for the image variable */
+   imgid = ncvarid(mincid, MIimage);
+   (void)ncvarinq(mincid, imgid, NULL, NULL, &ndims, dim, NULL);
+
+   /* Loop over them to find the spatial ones */
+   for(idim = 0; idim < ndims; idim++){
+
+      /* Get the name and check that this is a spatial dimension */
+      (void)ncdiminq(mincid, dim[idim], dimname, NULL);
+      if((dimname[0] == '\0') || (strcmp(&dimname[1], "space") != 0)){
+         continue;
+         }
+
+      /* Look for the spatial dimensions */
+      switch (dimname[0]){
+      case 'x':
+         world_index = 0;
+         break;
+      case 'y':
+         world_index = 1;
+         break;
+      case 'z':
+         world_index = 2;
+         break;
+      default:
+         world_index = 0;
+         break;
+         }
+      space_to_dim[world_index] = idim;
+      dim_to_space[idim] = world_index;
+      }
+   }
+
+/* Get the voxel to world transform (for column vectors) */
+void get_minc_voxel_to_world(int mincid,
+                             double voxel_to_world[WORLD_NDIMS][WORLD_NDIMS + 1])
+{
+   int      idim, jdim;
+   double   dircos[WORLD_NDIMS];
+   double   step, start;
+   char    *dimensions[] = { MIxspace, MIyspace, MIzspace };
+
+   /* Zero the matrix */
+   for(idim = 0; idim < WORLD_NDIMS; idim++){
+      for(jdim = 0; jdim < WORLD_NDIMS + 1; jdim++)
+         voxel_to_world[idim][jdim] = 0.0;
+      }
+
+   for(jdim = 0; jdim < WORLD_NDIMS; jdim++){
+
+      /* Set default values */
+      step = 1.0;
+      start = 0.0;
+      for(idim = 0; idim < WORLD_NDIMS; idim++)
+         dircos[idim] = 0.0;
+      dircos[jdim] = 1.0;
+
+      /* Get the attributes */
+      get_minc_attribute(mincid, dimensions[jdim], MIstart, 1, &start);
+      get_minc_attribute(mincid, dimensions[jdim], MIstep, 1, &step);
+      get_minc_attribute(mincid, dimensions[jdim], MIdirection_cosines,
+                         WORLD_NDIMS, dircos);
+      normalize_vector(dircos);
+
+      /* Put them in the matrix */
+      for(idim = 0; idim < WORLD_NDIMS; idim++){
+         voxel_to_world[idim][jdim] = step * dircos[idim];
+         voxel_to_world[idim][WORLD_NDIMS] += start * dircos[idim];
+         }
+      }
+   }
+
+void normalize_vector(double vector[])
+{
+   int      idim;
+   double   magnitude;
+
+   magnitude = 0.0;
+   for(idim = 0; idim < WORLD_NDIMS; idim++){
+      magnitude += (vector[idim] * vector[idim]);
+      }
+   magnitude = sqrt(magnitude);
+   if(magnitude > 0.0){
+      for(idim = 0; idim < WORLD_NDIMS; idim++){
+         vector[idim] /= magnitude;
+         }
+      }
+   }
+
+/* Transforms a coordinate through a linear transform */
+void transform_coord(double out_coord[],
+                     double transform[WORLD_NDIMS][WORLD_NDIMS + 1], double in_coord[])
+{
+   int      idim, jdim;
+   double   homogeneous_coord[WORLD_NDIMS + 1];
+
+   for(idim = 0; idim < WORLD_NDIMS; idim++){
+      homogeneous_coord[idim] = in_coord[idim];
+      }
+   homogeneous_coord[WORLD_NDIMS] = 1.0;
+
+   for(idim = 0; idim < WORLD_NDIMS; idim++){
+      out_coord[idim] = 0.0;
+      for(jdim = 0; jdim < WORLD_NDIMS + 1; jdim++){
+         out_coord[idim] += transform[idim][jdim] * homogeneous_coord[jdim];
+         }
+      }
+
    }

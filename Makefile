@@ -5,7 +5,7 @@ OBJS = $(PROGS:=.o) $(HEADERS:.h=.o) lex.o
 LEX=flex
 CC=cc
 
-OPTIONS = -Wall -O3
+OPTIONS = -pedantic -Wall -O3
 INCLUDES = -I/usr/local/mni/include
 CFLAGS = $(OPTIONS) $(INCLUDES) `gsl-config --cflags`
 
