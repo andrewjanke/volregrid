@@ -1,24 +1,29 @@
 /* volregrid.c                                                               */
 /*                                                                           */
 /* Performs regridding on a series of input MINC volumes or raw input data   */
-/*                                                                           */
-/* Andrew Janke - rotor@cmr.uq.edu.au                                        */
-/* Mark Griffin - mark@cmr.uq.edu.au                                         */
-/* Center for Magnetic Resonance                                             */
-/* University of Queensland                                                  */
-/*                                                                           */
-/* Copyright Andrew Janke & Mark Griffin The University of Queensland.       */
-/* Permission to use, copy, modify, and distribute this software and its     */
-/* documentation for any purpose and without fee is hereby granted,          */
-/* provided that the above copyright notice appear in all copies.  The       */
-/* author and the University of Queensland make no representations about the */
-/* suitability of this software for any purpose.  It is provided "as is"     */
-/* without express or implied warranty.                                      */
-/*                                                                           */
-/* Wed Dec 11 14:57:44 EST 2002 - inital version for sodium k-space data     */
-/* Wed Dec 18 09:20:02 EST 2002 - added lex parser for arbitrary path data   */
-/* Fri Jan 10 15:21:30 EST 2003 - First working version                      */
+/*                                                                            */
+/* Andrew Janke - rotor@cmr.uq.edu.au                                         */
+/* Mark Griffin - mark.griffin@cmr.uq.edu.au                                  */
+/* Center for Magnetic Resonance                                              */
+/* The University of Queensland                                               */
+/* http://www.cmr.uq.edu.au/~rotor                                            */
+/*                                                                            */
+/* Copyright (C) 2003 Andrew Janke and Mark Griffin                           */
+/* This program is free software; you can redistribute it and/or              */
+/* modify it under the terms of the GNU General Public License                */
+/* as published by the Free Software Foundation; either version 2             */
+/* of the License, or (at your option) any later version.                     */
+/*                                                                            */
+/* This program is distributed in the hope that it will be useful,            */
+/* but WITHOUT ANY WARRANTY; without even the implied warranty of             */
+/* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the              */
+/* GNU General Public License for more details.                               */
+/*                                                                            */
+/* You should have received a copy of the GNU General Public License          */
+/* along with this program; if not, write to the Free Software                */
+/* Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. */
 
+#include <config.h>
 #include <math.h>
 #include <float.h>
 #include <sys/stat.h>
@@ -67,11 +72,13 @@ void     regrid_loop(void *caller_data, long num_voxels,
                      double *input_data[],
                      int output_num_buffers, int output_vector_length,
                      double *output_data[], Loop_Info * loop_info);
-void     regrid_minc(char *in_fn, Volume * totals, Volume * weights, int v_size,
-                     double floor, double ceil);
+void     regrid_minc(char *in_fn, int buff_size,
+                     Volume * totals, Volume * weights, int v_size,
+                     double regrid_floor, double regrid_ceil);
 void     regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
                          Volume * totals, Volume * weights, int v_size,
-                         double floor, double ceil);
+                         double regrid_floor, double regrid_ceil);
+void     print_version_info(void);
 
 /* argument variables and table */
 static int verbose = FALSE;
@@ -87,7 +94,7 @@ static char *ap_coord_fn = NULL;
 
 /* regridding options */
 static double regrid_range[2] = { -DBL_MAX, DBL_MAX };
-static double regrid_radius = 2.0;
+static double regrid_radius[3] = { 2.0, 2.0, 2.0 };
 static Regrid_op regrid_type = GAUSSIAN_FUNC;
 static double regrid_sigma = 1.0;
 
@@ -118,6 +125,9 @@ Volume_Definition out_inf = {
    };
 
 static ArgvInfo argTable[] = {
+   {NULL, ARGV_HELP, (char *)NULL, (char *)NULL, "General options:"},
+   {"-version", ARGV_FUNC, (char *)print_version_info, (char *)NULL,
+    "print version info and exit"},
    {"-verbose", ARGV_CONSTANT, (char *)TRUE, (char *)&verbose,
     "Print out extra information."},
    {"-clobber", ARGV_CONSTANT, (char *)TRUE, (char *)&clobber,
@@ -198,8 +208,8 @@ static ArgvInfo argTable[] = {
     "Ignore input data above this value during regridding."},
    {"-regrid_range", ARGV_FLOAT, (char *)2, (char *)regrid_range,
     "Ignore input data outside the input range during regridding."},
-   {"-regrid_radius", ARGV_FLOAT, (char *)1, (char *)&regrid_radius,
-    "Defines the Window radius for regridding (in mm)."},
+   {"-regrid_radius", ARGV_FLOAT, (char *)3, (char *)&regrid_radius,
+    "Defines a 3d Window radius for regridding (in mm)."},
    {"-kaiser_bessel", ARGV_CONSTANT, (char *)KAISERBESSEL_FUNC, (char *)&regrid_type,
     "Use a Kaiser-Bessel convolution kernel for the reconstruction."},
    {"-gaussian", ARGV_CONSTANT, (char *)GAUSSIAN_FUNC, (char *)&regrid_type,
@@ -231,7 +241,7 @@ int main(int argc, char *argv[])
    long     num_missed;
    double   weight, value;
 
-   Real dummy[3];
+   Real     dummy[3];
 
    int      sizes[MAX_VAR_DIMS];
    double   starts[MAX_VAR_DIMS];
@@ -320,7 +330,7 @@ int main(int argc, char *argv[])
    /* out_inf.*[] are in world xyz order, perm[] is the permutation
       array to map world xyz to the right voxel order in the volume */
    for(i = 0; i < WORLD_NDIMS; i++){
-      sizes[i] = out_inf.nelem[perm[i]]; /* sizes, starts, steps are in voxel volume order. */
+      sizes[i] = out_inf.nelem[perm[i]];  /* sizes, starts, steps are in voxel volume order. */
       starts[i] = out_inf.start[perm[i]];
       steps[i] = out_inf.step[perm[i]];
       }
@@ -334,8 +344,8 @@ int main(int argc, char *argv[])
    set_volume_starts(totals, starts);
    set_volume_separations(totals, steps);
    for(i = 0; i < WORLD_NDIMS; i++){
-     /* out_inf.dircos is in world x,y,z order, we have to use the perm array to 
-        map each direction to the right voxel axis. */
+      /* out_inf.dircos is in world x,y,z order, we have to use the perm array to 
+         map each direction to the right voxel axis. */
       set_volume_direction_cosine(totals, i, out_inf.dircos[perm[i]]);
       }
    alloc_volume_data(totals);
@@ -350,7 +360,6 @@ int main(int argc, char *argv[])
       }
    alloc_volume_data(weights);
 
-
    /* down below in regrid_loop, Andrew makes a nasty direct reference to the
       voxel_to_world transformation in the volume.  This
       transformation is not necessarily up to date, particularly when
@@ -363,11 +372,8 @@ int main(int argc, char *argv[])
       So here, we'll (LC + MK) force an update by calling a general
       transform.  */
 
-
-   convert_world_to_voxel(weights, 0,0,0, dummy);
-   convert_world_to_voxel(totals,  0,0,0, dummy);
-
-
+   convert_world_to_voxel(weights, (Real) 0, (Real) 0, (Real) 0, dummy);
+   convert_world_to_voxel(totals, (Real) 0, (Real) 0, (Real) 0, dummy);
 
    /* initialize both of them */
    for(k = sizes[Z_IDX]; k--;){
@@ -408,8 +414,8 @@ int main(int argc, char *argv[])
          if(verbose){
             fprintf(stdout, " | Input file:      %s\n", infiles[i]);
             }
-         regrid_minc(infiles[i], &totals, &weights,
-                     vect_size, regrid_range[0], regrid_range[1]);
+         regrid_minc(infiles[i], max_buffer_size_in_kb,
+                     &totals, &weights, vect_size, regrid_range[0], regrid_range[1]);
          }
       }
 
@@ -639,8 +645,9 @@ void regrid_loop(void *caller_data, long num_voxels,
    }
 
 /* regrid using a minc volume */
-void regrid_minc(char *in_fn, Volume * totals, Volume * weights, int v_size,
-                 double floor, double ceil)
+void regrid_minc(char *in_fn, int buffer_size,
+                 Volume * totals, Volume * weights, int v_size,
+                 double regrid_floor, double regrid_ceil)
 {
    Loop_Data ld;
    Loop_Options *loop_opt;
@@ -655,8 +662,8 @@ void regrid_minc(char *in_fn, Volume * totals, Volume * weights, int v_size,
    /* alloc space for data_buf */
    ld.data_buf = (double *)malloc(sizeof(double) * v_size);
 
-   ld.floor = floor;
-   ld.ceil = ceil;
+   ld.floor = regrid_floor;
+   ld.ceil = regrid_ceil;
 
    ld.totals = totals;
    ld.weights = weights;
@@ -665,7 +672,7 @@ void regrid_minc(char *in_fn, Volume * totals, Volume * weights, int v_size,
    loop_opt = create_loop_options();
    set_loop_first_input_mincid(loop_opt, mincid);
    set_loop_verbose(loop_opt, verbose);
-   set_loop_buffer_size(loop_opt, (long)1024 * max_buffer_size_in_kb);
+   set_loop_buffer_size(loop_opt, (long)1024 * buffer_size);
    voxel_loop(1, &in_fn, 0, NULL, NULL, loop_opt, regrid_loop, (void *)&ld);
    free_loop_options(loop_opt);
 
@@ -677,7 +684,7 @@ void regrid_minc(char *in_fn, Volume * totals, Volume * weights, int v_size,
 /* return resulting totals and weights volumes */
 void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
                      Volume * totals, Volume * weights, int v_size,
-                     double floor, double ceil)
+                     double regrid_floor, double regrid_ceil)
 {
    Coord_list coord_buf;
    double  *data_buf = NULL;
@@ -687,6 +694,16 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
    int      total_pts;
    double   value;
    int      valid;
+
+   /* global max-min counters */
+   double   v_min, v_max;
+   double   x_min, y_min, z_min;
+   double   x_max, y_max, z_max;
+
+   /* loop max-min counters */
+   double   l_v_min, l_v_max;
+   double   l_x_min, l_y_min, l_z_min;
+   double   l_x_max, l_y_max, l_z_max;
 
    /* get volume info */
    get_volume_sizes(*totals, sizes);
@@ -708,6 +725,10 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
       fprintf(stdout, " + Doing arbitrary path (vector: %d)\n", v_size);
       }
    total_pts = 0;
+   v_min = DBL_MAX;
+   v_max = -DBL_MAX;
+   x_min = y_min = z_min = DBL_MAX;
+   x_max = y_max = z_max = -DBL_MAX;
    coord_buf = get_some_arb_path_coords(buff_size);
    while(coord_buf->n_pts != 0){
 
@@ -726,19 +747,35 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
 
       total_pts += coord_buf->n_pts;
       if(verbose){
-         fprintf(stdout, " | got %d co-ords   total: %d\n", coord_buf->n_pts, total_pts);
+         fprintf(stdout, " | %d co-ords total: %d ", coord_buf->n_pts, total_pts);
+         fflush(stdout);
          }
 
       /* regrid (do the nasty) */
+      l_v_min = DBL_MAX;
+      l_v_max = -DBL_MAX;
+      l_x_min = l_y_min = l_z_min = DBL_MAX;
+      l_x_max = l_y_max = l_z_max = -DBL_MAX;
       for(c = 0; c < coord_buf->n_pts; c++){
 
          /* check if this point is in range */
-         valid = 0;
+         valid = 1;
          for(v = 0; v < v_size; v++){
             value = data_buf[(c * v_size) + v];
 
-            if(value > floor && value < ceil){
-               valid = 1;
+            if(value < regrid_floor || value > regrid_ceil){
+               valid = 0;
+               }
+            else {
+               /* do range calculation */
+               if(verbose){
+                  if(value > l_v_max){
+                     l_v_max = value;
+                     }
+                  else if(value < l_v_min){
+                     l_v_min = value;
+                     }
+                  }
                }
             }
 
@@ -747,11 +784,78 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
                          coord_buf->pts[c].coord[0],
                          coord_buf->pts[c].coord[1],
                          coord_buf->pts[c].coord[2], v_size, &data_buf[c * v_size]);
+
+            /* coord max-min storage */
+            if(verbose){
+               if(coord_buf->pts[c].coord[0] > l_x_max){
+                  l_x_max = coord_buf->pts[c].coord[0];
+                  }
+               else if(coord_buf->pts[c].coord[0] < l_x_min){
+                  l_x_min = coord_buf->pts[c].coord[0];
+                  }
+
+               if(coord_buf->pts[c].coord[1] > l_y_max){
+                  l_y_max = coord_buf->pts[c].coord[1];
+                  }
+               else if(coord_buf->pts[c].coord[1] < l_y_min){
+                  l_y_min = coord_buf->pts[c].coord[1];
+                  }
+
+               if(coord_buf->pts[c].coord[2] > l_z_max){
+                  l_z_max = coord_buf->pts[c].coord[2];
+                  }
+               else if(coord_buf->pts[c].coord[2] < l_z_min){
+                  l_z_min = coord_buf->pts[c].coord[2];
+                  }
+               }
+
             }
+         }
+
+      if(verbose){
+         fprintf(stdout, " xyz [%4.1g:%4.1g:%4.1g] : [%4.1g:%4.1g:%4.1g] v: [%g:%g]\n",
+                 l_x_min, l_y_min, l_z_min, l_x_max, l_y_max, l_z_max, l_v_min, l_v_max);
+         }
+
+      /* update global counters */
+      if(verbose){
+         if(l_v_min < v_min){
+            v_min = l_v_min;
+            }
+         if(l_v_max > v_max){
+            v_max = l_v_max;
+            }
+
+         if(l_x_min < x_min){
+            x_min = l_x_min;
+            }
+         if(l_y_min < y_min){
+            y_min = l_y_min;
+            }
+         if(l_z_min < z_min){
+            z_min = l_z_min;
+            }
+
+         if(l_x_max > x_max){
+            x_max = l_x_max;
+            }
+         if(l_y_max > y_max){
+            y_max = l_y_max;
+            }
+         if(l_z_max > z_max){
+            z_max = l_z_max;
+            }
+
          }
 
       /* get the next lot of co-ordinates */
       coord_buf = get_some_arb_path_coords(buff_size);
+      }
+
+   if(verbose){
+      fprintf(stdout,
+              " | == global xyz [%4.1g:%4.1g:%4.1g] : [%4.1g:%4.1g:%4.1g] v: [%g:%g]\n",
+              x_min, y_min, z_min, x_max, y_max, z_max, v_min, v_max);
       }
 
    /* finish up */
@@ -773,73 +877,81 @@ void regrid_point(Volume * totals, Volume * weights,
    double   euc[3];
    double   c_pos[3];
    int      i, j, k, v;
-   double   coord[3];		/* target point in mm  coordinates, in X, Y, Z order */
+   double   coord[3];                  /* target point in mm  coordinates, in X, Y, Z order */
 
-   Transform       dircos, invdircos;
-   Vector          vector;
-   Real            dir[3];
+   Transform dircos, invdircos;
+   Vector   vector;
+   Real     dir[3];
 
    /* the coord used below has to be in mm coordinates in the dircos space of the 
       target volume.  Hence the manipulations with the vols direction_cosines      */
-   make_identity_transform( &dircos );
+   make_identity_transform(&dircos);
 
-   get_volume_direction_cosine( * totals, perm[0],  dir); 
-   fill_Vector ( vector, dir[0], dir[1], dir[2]);
-   set_transform_x_axis( &dircos, &vector);
+   get_volume_direction_cosine(*totals, perm[0], dir);
+   fill_Vector(vector, dir[0], dir[1], dir[2]);
+   set_transform_x_axis(&dircos, &vector);
 
-   get_volume_direction_cosine( * totals, perm[1],  dir); 
-   fill_Vector ( vector, dir[0], dir[1], dir[2]);
-   set_transform_y_axis( &dircos, &vector);
+   get_volume_direction_cosine(*totals, perm[1], dir);
+   fill_Vector(vector, dir[0], dir[1], dir[2]);
+   set_transform_y_axis(&dircos, &vector);
 
+   get_volume_direction_cosine(*totals, perm[2], dir);
+   fill_Vector(vector, dir[0], dir[1], dir[2]);
+   set_transform_z_axis(&dircos, &vector);
 
-   get_volume_direction_cosine( * totals, perm[2],  dir); 
-   fill_Vector ( vector, dir[0], dir[1], dir[2]);
-   set_transform_z_axis( &dircos, &vector);
+   for_less(i, 0, 4){
+      for_less(j, 0, 4){
+         Transform_elem(invdircos, i, j) = Transform_elem(dircos, j, i);
+         }
+      }
 
-   for_less(i,0,4) {
-     for_less(j,0,4) {
-       Transform_elem(invdircos,i,j) = Transform_elem(dircos,j,i);
-     }
-   }
-     
-   transform_point( &invdircos,
-		    x, y, z,
-		    &coord[0],&coord[1],&coord[2]);
+   transform_point(&invdircos, x, y, z, &coord[0], &coord[1], &coord[2]);
 
-   get_volume_sizes(*totals, sizes);       /* in volume voxel order, ie z,y,x with x fastest */
+   get_volume_sizes(*totals, sizes);   /* in volume voxel order, ie z,y,x with x fastest */
    get_volume_separations(*totals, steps);
    get_volume_starts(*totals, starts);
 
    /* figure out the neighbouring voxels start and stop (in voxel co-ordinates) */
-   for(i = 0; i < 3; i++){	/* go through x, y and z */
+   for(i = 0; i < 3; i++){            /* go through x, y and z */
       start_idx[i] =
-         (int)rint((coord[i] - starts[perm[i]] - regrid_radius) / steps[perm[i]]);
-      stop_idx[i] = start_idx[i] + rint((regrid_radius * 2) / steps[perm[i]]);
+         (int)rint((coord[i] - starts[perm[i]] - regrid_radius[i]) / steps[perm[i]]);
+      stop_idx[i] = start_idx[i] + rint((regrid_radius[i] * 2) / steps[perm[i]]);
+
+      /* flip if required */
+      if(start_idx[i] > stop_idx[i]){
+         value = start_idx[i];
+         start_idx[i] = stop_idx[i];
+         stop_idx[i] = value;
+         }
 
       /* check that we aren't off the edge */
       if(start_idx[i] < 0){
          start_idx[i] = 0;
          }
-      if(stop_idx[i] > sizes[perm[i]]){
-         stop_idx[i] = sizes[perm[i]];
+      if(stop_idx[i] >= sizes[perm[i]]){
+         stop_idx[i] = sizes[perm[i]] - 1;
          }
       }
 
    /* loop over the neighbours, getting euclidian distance */
    c_pos[0] = starts[perm[0]] + (start_idx[0] * steps[perm[0]]);
-   for(i = start_idx[0]; i < stop_idx[0]; i++){
+   for(i = start_idx[0]; i <= stop_idx[0]; i++){
       euc[0] = fabs(c_pos[0] - coord[0]);
 
       c_pos[1] = starts[perm[1]] + (start_idx[1] * steps[perm[1]]);
-      for(j = start_idx[1]; j < stop_idx[1]; j++){
+      for(j = start_idx[1]; j <= stop_idx[1]; j++){
          euc[1] = fabs(c_pos[1] - coord[1]);
 
          c_pos[2] = starts[perm[2]] + (start_idx[2] * steps[perm[2]]);
-         for(k = start_idx[2]; k < stop_idx[2]; k++){
+         for(k = start_idx[2]; k <= stop_idx[2]; k++){
             euc[2] = fabs(c_pos[2] - coord[2]);
 
             euc_dist = sqrt(SQR2(euc[0]) + SQR2(euc[1]) + SQR2(euc[2]));
-            if(euc_dist <= regrid_radius){
+//            if(euc_dist <= regrid_radius){
+
+            if((regrid_radius[0] == 0 || euc[0] <= regrid_radius[0]) &&
+               (regrid_radius[1] == 0 || euc[1] <= regrid_radius[1]) &&
+               (regrid_radius[2] == 0 || euc[2] <= regrid_radius[2])){
 
                /* calculate the weighting factor */
                switch (regrid_type){
@@ -857,12 +969,12 @@ void regrid_point(Volume * totals, Volume * weights,
                case KAISERBESSEL_FUNC:
                   weight =
                      gsl_sf_bessel_I0(regrid_sigma *
-                                      sqrt(1 - SQR2(euc[0] / regrid_radius))) *
+                                      sqrt(1 - SQR2(euc[0] / regrid_radius[0]))) *
                      gsl_sf_bessel_I0(regrid_sigma *
-                                      sqrt(1 - SQR2(euc[1] / regrid_radius))) *
+                                      sqrt(1 - SQR2(euc[1] / regrid_radius[1]))) *
                      gsl_sf_bessel_I0(regrid_sigma *
-                                      sqrt(1 - SQR2(euc[2] / regrid_radius))) /
-                     SQR3(regrid_radius);
+                                      sqrt(1 - SQR2(euc[2] / regrid_radius[2]))) /
+                     SQR3((regrid_radius[0] + regrid_radius[1] + regrid_radius[2]) / 3);
 
                   break;
 
@@ -972,4 +1084,13 @@ int get_model_file_info(char *dst, char *key, char *nextArg)
    miclose(mincid);
 
    return TRUE;
+   }
+
+void print_version_info(void)
+{
+   fprintf(stdout, "\n");
+   fprintf(stdout, "%s version %s\n", PACKAGE, VERSION);
+   fprintf(stdout, "Comments to %s\n", PACKAGE_BUGREPORT);
+   fprintf(stdout, "\n");
+   exit(EXIT_SUCCESS);
    }
