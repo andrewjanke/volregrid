@@ -372,9 +372,10 @@ int main(int argc, char *argv[])
       So here, we'll (LC + MK) force an update by calling a general
       transform.  */
 
-   convert_world_to_voxel(weights, (Real) 0, (Real) 0, (Real) 0, dummy);
-   convert_world_to_voxel(totals, (Real) 0, (Real) 0, (Real) 0, dummy);
+//   convert_world_to_voxel(weights, (Real) 0, (Real) 0, (Real) 0, dummy);
+//   convert_world_to_voxel(totals, (Real) 0, (Real) 0, (Real) 0, dummy);
 
+   fprintf(stderr, "2Sizes: [%d:%d:%d] \n", sizes[perm[0]], sizes[perm[1]], sizes[perm[2]]);
    /* initialize both of them */
    for(k = sizes[Z_IDX]; k--;){
       for(j = sizes[Y_IDX]; j--;){
@@ -426,9 +427,10 @@ int main(int argc, char *argv[])
    w_min = get_volume_real_value(weights, 0, 0, 0, 0, 0);
    w_max = get_volume_real_value(weights, 0, 0, 0, 0, 0);
    initialize_progress_report(&progress, FALSE, out_inf.nelem[Z_IDX], "Dividing through");
-   for(k = sizes[Z_IDX]; k--;){
-      for(j = sizes[Y_IDX]; j--;){
-         for(i = sizes[X_IDX]; i--;){
+   
+   for(i = sizes[perm[0]]; i--;){
+      for(j = sizes[perm[1]]; j--;){
+         for(k = sizes[perm[2]]; k--;){
             weight = get_volume_real_value(weights, k, j, i, 0, 0);
             if(weight < w_min){
                w_min = weight;
@@ -436,7 +438,7 @@ int main(int argc, char *argv[])
             else if(weight > w_max){
                w_max = weight;
                }
-
+            
             if(weight != 0){
                for(v = vect_size; v--;){
                   value = get_volume_real_value(totals, k, j, i, v, 0) / weight;
@@ -446,7 +448,7 @@ int main(int argc, char *argv[])
                   else if(value > max){
                      max = value;
                      }
-
+                  
                   set_volume_real_value(totals, k, j, i, v, 0, value);
                   }
                }
@@ -777,7 +779,14 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
                      }
                   }
                }
+            
+         //   fprintf(stderr, "Value: %g   valid %d\n", value, valid);
             }
+         // fprintf(stderr, "VV %d    [%g:%g:%g]\n", valid, 
+         //        coord_buf->pts[c].coord[0], 
+         //        coord_buf->pts[c].coord[1], 
+         //        coord_buf->pts[c].coord[2] 
+         //        );
 
          if(valid){
             regrid_point(totals, weights,
@@ -906,7 +915,7 @@ void regrid_point(Volume * totals, Volume * weights,
       }
 
    transform_point(&invdircos, x, y, z, &coord[0], &coord[1], &coord[2]);
-
+   
    get_volume_sizes(*totals, sizes);   /* in volume voxel order, ie z,y,x with x fastest */
    get_volume_separations(*totals, steps);
    get_volume_starts(*totals, starts);
@@ -980,6 +989,7 @@ void regrid_point(Volume * totals, Volume * weights,
 
                case GAUSSIAN_FUNC:
                   weight = exp(-SQR2(euc_dist) / SQR2(regrid_sigma));
+           //       fprintf(stderr, "weight %g    euc_dist: %g [%g:%g:%g]  regrid_sigma: %g\n", weight, euc_dist, euc[0], euc[1], euc[2], regrid_sigma   );
                   break;
                   }
 
@@ -988,6 +998,11 @@ void regrid_point(Volume * totals, Volume * weights,
                   value = get_volume_real_value(*totals, k, j, i, v, 0);
                   set_volume_real_value(*totals, k, j, i, v, 0,
                                         value + (data_buf[0 + v] * weight));
+           //       fprintf(stderr, "At point: %d:%d:%d:%d   ss [%d:%d:%d]-[%d:%d:%d]  value: %g (%g)\n", 
+           //               i, j, k, v, 
+           //               start_idx[0], start_idx[1], start_idx[2], 
+           //               stop_idx[0], stop_idx[1], stop_idx[2], 
+           //               value + (data_buf[0 + v]),  weight);
                   }
 
                /* increment count value */
