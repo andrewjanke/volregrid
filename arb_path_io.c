@@ -145,6 +145,9 @@ int get_some_arb_path_data(double *data_buf, nc_type dtype, int is_signed,
       case NC_DOUBLE:
          data_buf[c] = (double)*((double *)ptr);
          break;
+      
+      default:
+         fprintf(stderr, "Erk: unknown data type (%d), this is bad\n\n", dtype);
          }
 
       ptr += elem_size;
