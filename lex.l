@@ -8,6 +8,7 @@ COORD     {REAL}\,{REAL}\,{REAL}
 RCOORD    "@["{COORD}"]"
 
 %{ 
+   #include <stdio.h>
    #include <math.h>
    #include <string.h>
    #include "arb_path_io.h"
