@@ -36,7 +36,7 @@
 #define Z_IDX 0
 #define V_IDX 3
 
-#define SQR(x) ((x)*(x))
+#define SQR2(x) ((x)*(x))
 #define SQR3(x) ((x)*(x)*(x))
 
 typedef enum { UNSPECIFIED_FUNC = 0, KAISERBESSEL_FUNC, GAUSSIAN_FUNC, NEAREST_FUNC
@@ -57,8 +57,7 @@ int      in_is_signed = FALSE;
 /* arb path variables */
 char    *ap_coord_fn = NULL;
 int      ap_buff_size = 2048;
-double   ap_window_radius = 1.0;
-
+double   ap_window_radius = 2.0;
 Regrid_op regrid_type = GAUSSIAN_FUNC;
 double   ap_sigma = 1.0;
 
@@ -149,7 +148,7 @@ static ArgvInfo argTable[] = {
     "Regrid data using an arbitrary path from the input filename"},
    {"-arb_path_coord_buffer", ARGV_INT, (char *)1, (char *)&ap_buff_size,
     "Size of arbitrary path co-ordinate buffer"},
-   {"-ap_window_radius", ARGV_FLOAT, (char *)1, (char *)&ap_window_radius,
+   {"-window_radius", ARGV_FLOAT, (char *)1, (char *)&ap_window_radius,
     "Defines the Window radius for regridding (in mm)."},
 
    {"-kaiser_bessel", ARGV_CONSTANT, (char *)KAISERBESSEL_FUNC, (char *)&regrid_type,
@@ -387,7 +386,7 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
                   euc[0] = fabs(c_pos[0] - coord_buf->pts[c].coord[0]);
                   euc[1] = fabs(c_pos[1] - coord_buf->pts[c].coord[1]);
                   euc[2] = fabs(c_pos[2] - coord_buf->pts[c].coord[2]);
-                  euc_dist = sqrt(SQR(euc[0]) + SQR(euc[1]) + SQR(euc[2]));
+                  euc_dist = sqrt(SQR2(euc[0]) + SQR2(euc[1]) + SQR2(euc[2]));
 
                   if(euc_dist <= ap_window_radius){
 
@@ -407,17 +406,17 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
                      case KAISERBESSEL_FUNC:
                         weight =
                            gsl_sf_bessel_I0(ap_sigma *
-                                            sqrt(1 - SQR(euc[0] / ap_window_radius))) *
+                                            sqrt(1 - SQR2(euc[0] / ap_window_radius))) *
                            gsl_sf_bessel_I0(ap_sigma *
-                                            sqrt(1 - SQR(euc[1] / ap_window_radius))) *
+                                            sqrt(1 - SQR2(euc[1] / ap_window_radius))) *
                            gsl_sf_bessel_I0(ap_sigma *
-                                            sqrt(1 - SQR(euc[2] / ap_window_radius))) /
+                                            sqrt(1 - SQR2(euc[2] / ap_window_radius))) /
                            SQR3(ap_window_radius);
 
                         break;
 
                      case GAUSSIAN_FUNC:
-                        weight = exp(-SQR(euc_dist) / SQR(ap_sigma));
+                        weight = exp(-SQR2(euc_dist) / SQR2(ap_sigma));
                         break;
                         }
 
