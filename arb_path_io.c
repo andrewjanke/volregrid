@@ -32,20 +32,20 @@ int init_arb_path(char *coord_fname, char *data_fname)
 {
    /* initialise the parser with the coordinates config file */
    if(!yyflex_init(coord_fname)){
-      fprintf(stderr, "Failed to init the parser\n");
+      fprintf(stderr, "Failed to init the parser\n\n");
       return 0;
       }
 
    /* init the primary coord list - list[0] */
    if(new_coord_list(0, "DEFAULT") != 0){
-      fprintf(stdout, "Something is amiss, the initial list is not 0!\n");
+      fprintf(stdout, "Something is amiss, the initial list is not 0!\n\n");
       exit(EXIT_FAILURE);
       }
 
    /* open the data file */
    data_fp = fopen(data_fname, "r");
    if(data_fp == NULL){
-      fprintf(stderr, "Failed to open the data file %s\n", data_fname);
+      fprintf(stderr, "Failed to open the data file %s\n\n", data_fname);
       return 0;
       }
 
@@ -55,9 +55,20 @@ int init_arb_path(char *coord_fname, char *data_fname)
 /* finalize the parser */
 void end_arb_path(void)
 {
+   void    *tmp;
+
    /* tidy up */
    yyflex_end();
-   
+
+   /* check that we used all of the data */
+   tmp = (void *)malloc(1);
+   fread(tmp, 1, 1, data_fp);
+
+   if(!feof(data_fp)){
+      fprintf(stderr, "WARNING: not all the raw data was used!\n\n");
+      }
+   free(tmp);
+
    /* close the data FP */
    fclose(data_fp);
    }
@@ -67,12 +78,14 @@ Coord_list get_some_arb_path_coords(size_t max_buf_size)
 {
    /* first empty out the list */
    if(!set_coord_list_size(coord_lists[0], 0)){
-      fprintf(stderr, "Error clearing out Default list\n");
+      fprintf(stderr, "Error clearing out Default list\n\n");
       exit(EXIT_FAILURE);
       }
 
    /* then fill it up again */
-   while (yylex() && coord_lists[0]->n_pts < max_buf_size);
+   while (yylex() && coord_lists[0]->n_pts < max_buf_size){
+      ;
+      }
 
    return (coord_lists[0]);
    }
@@ -92,18 +105,18 @@ int get_some_arb_path_data(double *data_buf, nc_type dtype, int is_signed,
 
    elem_size = nctypelen(dtype);
    n_elem = n_pts * vector_size;
-   
+
    /* allocate space for data buffer */
    tmp = (void *)malloc(elem_size * n_elem);
-   
+
    /* get the data */
    nread = fread(tmp, elem_size, n_elem, data_fp);
    if(nread != n_elem){
-      fprintf(stderr, "Premature end of data file: Number read %d != %d\n", nread,
+      fprintf(stderr, "Premature end of data file: Number read %d != %d\n\n", nread,
               n_elem);
       exit(EXIT_FAILURE);
       }
-   
+
    /* convert data to real */
    ptr = tmp;
    for(c = 0; c < n_elem; c++){
@@ -133,7 +146,7 @@ int get_some_arb_path_data(double *data_buf, nc_type dtype, int is_signed,
          data_buf[c] = (double)*((double *)ptr);
          break;
          }
-      
+
       ptr += elem_size;
       }
 
@@ -180,13 +193,13 @@ int new_coord_list(size_t size, char *name)
 int set_coord_list_size(Coord_list list, size_t size)
 {
    list->n_pts = size;
-   
+
    /* only grow a list, never shrink */
    if(size > list->alloc_size){
       list->alloc_size = size;
       list->pts = (Coord *) realloc(list->pts, list->alloc_size * sizeof(*list->pts));
       }
-   
+
    return 1;
    }
 
@@ -222,7 +235,7 @@ int add_coord_to_list(int list_id, double x, double y, double z)
 {
    Coord_list list = coord_lists[list_id];
    int      c_pt = list->n_pts;
-   register int      i;
+   register int i;
 
    set_coord_list_size(list, list->n_pts + 1);
 
@@ -287,7 +300,7 @@ int call_list(char *name)
       }
 
    if(list == NULL){
-      fprintf(stderr, "Couldn't find list called '%s'\n", name);
+      fprintf(stderr, "Couldn't find list called '%s'\n\n", name);
       return 0;
       }
 

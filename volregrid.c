@@ -29,7 +29,6 @@
 #include <gsl/gsl_sf_bessel.h>
 #include "arb_path_io.h"
 
-#define NO_VALUE DBL_MAX               /* Constant to flag fact that value not set */
 #define DEF_BOOL -1
 #define X_IDX 2
 #define Y_IDX 1
@@ -136,8 +135,8 @@ static ArgvInfo argTable[] = {
    {NULL, ARGV_HELP, NULL, NULL, "\nRegridding options"},
    {"-2D", ARGV_CONSTANT, (char *)2, (char *)&regrid_dim,
     "Regrid slice by slice (Default 3D)."},
-   
-   
+
+
    {NULL, ARGV_HELP, NULL, NULL, "\nArbitrary path Regridding options"},
    {"-arb_path", ARGV_STRING, (char *)1, (char *)&ap_coord_fn,
     "Regrid data using an arbitrary path from the input filename"},
@@ -200,7 +199,7 @@ main(int argc, char *argv[])
    if(out_is_signed == DEF_BOOL){
       out_is_signed = in_is_signed;
       }
-   
+
    /* check vector dimension size */
    if(out_length[V_IDX] < 1){
       fprintf(stderr, "%s: -vector_length must be 1 or greater.\n\n", argv[0]);
@@ -239,7 +238,7 @@ main(int argc, char *argv[])
    if(verbose){
       fprintf(stdout, " | Input data:      %s\n", in_fn);
       fprintf(stdout, " | Arb path:        %s\n", ap_coord_fn);
-      fprintf(stdout, " | Output range:   [%g:%g]\n", out_range[0], out_range[1]);
+      fprintf(stdout, " | Output range:    [%g:%g]\n", out_range[0], out_range[1]);
       fprintf(stdout, " | Output file:     %s\n", out_fn);
       }
 
@@ -255,6 +254,7 @@ main(int argc, char *argv[])
       /* get the existing range */
       get_volume_real_range(out_vol, &o_min, &o_max);
 
+      /* rescale it */
       scale_volume(&out_vol, o_min, o_max, out_range[0], out_range[1]);
       }
 
@@ -316,6 +316,10 @@ void scale_volume(Volume * vol, double o_min, double o_max, double min, double m
       }
    terminate_progress_report(&progress);
 
+   if(verbose){
+      fprintf(stdout, " + rescaled data range: [%g:%g]\n", min, max);
+      }
+
    set_volume_real_range(*vol, min, max);
    }
 
@@ -334,6 +338,7 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
    int      n_stop[3];
    int      c;
    int      i, j, k, v;
+   int      total_pts;
    double   value;
    double   euc_dist;
    double   euc[3];
@@ -382,6 +387,10 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
       }
 
    /* get some co-ordinates */
+   if(verbose){
+      fprintf(stdout, " + Doing arbitrary path (vector: %d)\n", vect_size);
+      }
+   total_pts = 0;
    coord_buf = get_some_arb_path_coords(buff_size);
    while (coord_buf->n_pts != 0){
 
@@ -398,8 +407,9 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
          exit(EXIT_FAILURE);
          }
 
+      total_pts += coord_buf->n_pts;
       if(verbose){
-         fprintf(stdout, "Got %d co-ords - vect: %d\n", coord_buf->n_pts, vect_size);
+         fprintf(stdout, " | got %d co-ords   total: %d\n", coord_buf->n_pts, total_pts);
          }
 
       /* regrid (do the nasty) */
@@ -527,17 +537,21 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
 
    /* set the volumes (initial) range */
    if(verbose){
-      fprintf(stdout, " | range: [%g:%g]\n", min, max);
+      fprintf(stdout, " + data range: [%g:%g]\n", min, max);
       }
    set_volume_real_range(*out_vol, min, max);
 
    if(num_missed > 0){
+      int      nvox;
+
+      nvox = sizes[X_IDX] * sizes[Y_IDX] * sizes[Z_IDX];
+
       fprintf(stdout,
-              "-window_radius possibly too small, didn't put data in %d/%d[%2.2f%%] voxels\n",
-              num_missed, sizes[X_IDX] * sizes[Y_IDX] * sizes[Z_IDX] * sizes[V_IDX],
-              ((float)num_missed /
-               (sizes[X_IDX] * sizes[Y_IDX] * sizes[Z_IDX] * sizes[V_IDX])) * 100);
+              "\n-window_radius possibly too small, no data in %d/%d[%2.2f%%] voxels\n\n",
+              num_missed, nvox, ((float)num_missed / nvox * 100));
       }
+
+   /* finish up */
    end_arb_path();
    }
 
