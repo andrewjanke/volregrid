@@ -44,11 +44,11 @@ typedef enum { UNSPECIFIED_FUNC = 0, KAISERBESSEL_FUNC, GAUSSIAN_FUNC, NEAREST_F
 
 /* function prototypes */
 int      read_config_file(char *filename, char *args[]);
+void     scale_volume(Volume * vol, double o_min, double o_max, double min, double max);
 void     regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size,
                          Volume * out_vol);
 
 int      verbose = FALSE;
-int      debug = FALSE;
 int      clobber = FALSE;
 int      regrid_dim = 3;
 nc_type  in_dtype = NC_FLOAT;
@@ -65,8 +65,7 @@ double   ap_sigma = 1.0;
 char    *out_config_fn = NULL;
 nc_type  out_dtype = NC_UNSPECIFIED;
 int      out_is_signed = DEF_BOOL;
-double   valid_range[2] = { -DBL_MAX, DBL_MAX };
-double   real_range[2] = { 0, 1 };
+double   out_range[2] = { -DBL_MAX, DBL_MAX };
 double   out_start[MAX_VAR_DIMS] = { -50, -50, -50 };
 double   out_step[MAX_VAR_DIMS] = { 1, 1, 1 };
 int      out_length[MAX_VAR_DIMS] = { 100, 100, 100, 1 };
@@ -74,10 +73,8 @@ int      out_length[MAX_VAR_DIMS] = { 100, 100, 100, 1 };
 static ArgvInfo argTable[] = {
    {"-verbose", ARGV_CONSTANT, (char *)TRUE, (char *)&verbose,
     "Print out extra information."},
-   {"-debug", ARGV_CONSTANT, (char *)TRUE, (char *)&debug,
-    "Spew copious amounts of debugging info."},
    {"-clobber", ARGV_CONSTANT, (char *)TRUE, (char *)&clobber,
-    "Clobber existing files."},
+    "Overwrite existing files."},
 
    {NULL, ARGV_HELP, NULL, NULL, "\nRaw Infile Options"},
    {"-byte", ARGV_CONSTANT, (char *)NC_BYTE, (char *)&in_dtype,
@@ -92,13 +89,10 @@ static ArgvInfo argTable[] = {
     "Input data is double-precision data."},
    {"-signed", ARGV_CONSTANT, (char *)TRUE, (char *)&in_is_signed,
     "Input data is signed integer data."},
-   {"-ounsigned", ARGV_CONSTANT, (char *)FALSE, (char *)&in_is_signed,
-    "Input data is unsigned integer data."},
-   {"-range", ARGV_FLOAT, (char *)2, (char *)valid_range,
-    "Valid range of input values (default = full range)."},
-   {"-real_range", ARGV_FLOAT, (char *)2, (char *)real_range,
-    "Real range of input values (ignored for floating-point types)."},
-
+   {"-unsigned", ARGV_CONSTANT, (char *)FALSE, (char *)&in_is_signed,
+    "Input data is unsigned integer data. (Default)"},
+   {"-vector", ARGV_INT, (char *)1, (char *)&out_length[V_IDX],
+    "Size of vector dimension of Input data."},
 
    {NULL, ARGV_HELP, NULL, NULL, "\nOutfile Options"},
    {"-outconfig", ARGV_STRING, (char *)1, (char *)&out_config_fn,
@@ -107,8 +101,8 @@ static ArgvInfo argTable[] = {
     "Write out byte data."},
    {"-oshort", ARGV_CONSTANT, (char *)NC_SHORT, (char *)&out_dtype,
     "Write out short integer data."},
-   {"-int", ARGV_CONSTANT, (char *)NC_INT, (char *)&in_dtype,
-    "Input data is 32-bit integer"},
+   {"-oint", ARGV_CONSTANT, (char *)NC_INT, (char *)&out_dtype,
+    "Write out 32-bit integer data"},
    {"-ofloat", ARGV_CONSTANT, (char *)NC_FLOAT, (char *)&out_dtype,
     "Write out single-precision data. (Default)"},
    {"-odouble", ARGV_CONSTANT, (char *)NC_DOUBLE, (char *)&out_dtype,
@@ -117,6 +111,8 @@ static ArgvInfo argTable[] = {
     "Write signed integer data."},
    {"-ounsigned", ARGV_CONSTANT, (char *)FALSE, (char *)&out_is_signed,
     "Write unsigned integer data."},
+   {"-range", ARGV_FLOAT, (char *)2, (char *)out_range,
+    "Range to scale output values between (default = range of input data)."},
    {"-xstart", ARGV_FLOAT, (char *)1, (char *)&out_start[X_IDX],
     "Starting coordinate for x dimension."},
    {"-ystart", ARGV_FLOAT, (char *)1, (char *)&out_start[Y_IDX],
@@ -135,14 +131,13 @@ static ArgvInfo argTable[] = {
     "Number of samples in y dimension."},
    {"-zlength", ARGV_INT, (char *)1, (char *)&out_length[Z_IDX],
     "Number of samples in z dimension."},
-   {"-vector_length", ARGV_INT, (char *)1, (char *)&out_length[V_IDX],
-    "Number of samples in the vector dimension."},
 
 
    {NULL, ARGV_HELP, NULL, NULL, "\nRegridding options"},
    {"-2D", ARGV_CONSTANT, (char *)2, (char *)&regrid_dim,
     "Regrid slice by slice (Default 3D)."},
-
+   
+   
    {NULL, ARGV_HELP, NULL, NULL, "\nArbitrary path Regridding options"},
    {"-arb_path", ARGV_STRING, (char *)1, (char *)&ap_coord_fn,
     "Regrid data using an arbitrary path from the input filename"},
@@ -205,7 +200,7 @@ main(int argc, char *argv[])
    if(out_is_signed == DEF_BOOL){
       out_is_signed = in_is_signed;
       }
-
+   
    /* check vector dimension size */
    if(out_length[V_IDX] < 1){
       fprintf(stderr, "%s: -vector_length must be 1 or greater.\n\n", argv[0]);
@@ -218,7 +213,6 @@ main(int argc, char *argv[])
       exit(EXIT_FAILURE);
       }
 
-
    /* read in the output file config from a file is specified */
    if(out_config_fn != NULL){
       int      ext_args_c;
@@ -226,7 +220,7 @@ main(int argc, char *argv[])
 
       ext_args_c = read_config_file(out_config_fn, ext_args);
       if(ParseArgv(&ext_args_c, ext_args, argTable,
-                    ARGV_DONT_SKIP_FIRST_ARG || ARGV_NO_LEFTOVERS || ARGV_NO_DEFAULTS)){
+                    ARGV_DONT_SKIP_FIRST_ARG | ARGV_NO_LEFTOVERS | ARGV_NO_DEFAULTS)){
          fprintf(stderr, "\nError in parameters in %s\n", out_config_fn);
          exit(EXIT_FAILURE);
          }
@@ -239,23 +233,29 @@ main(int argc, char *argv[])
    set_volume_sizes(out_vol, out_length);
    set_volume_starts(out_vol, out_start);
    set_volume_separations(out_vol, out_step);
-   set_volume_real_range(out_vol, valid_range[0], valid_range[1]);
    alloc_volume_data(out_vol);
 
    /* print some pretty output */
    if(verbose){
       fprintf(stdout, " | Input data:      %s\n", in_fn);
       fprintf(stdout, " | Arb path:        %s\n", ap_coord_fn);
-      fprintf(stdout, " | Valid Range:    [%8.3f:%8.3f]\n", valid_range[0],
-              valid_range[1]);
-      fprintf(stdout, " | Real Range:     [%8.3f:%8.3f]\n", real_range[0], real_range[1]);
+      fprintf(stdout, " | Output range:   [%g:%g]\n", out_range[0], out_range[1]);
       fprintf(stdout, " | Output file:     %s\n", out_fn);
       }
-
 
    /* arbitrary path */
    if(ap_coord_fn != NULL){
       regrid_arb_path(ap_coord_fn, in_fn, ap_buff_size, out_length[V_IDX], &out_vol);
+      }
+
+   /* rescale data if required */
+   if(out_range[0] != -DBL_MAX && out_range[1] != DBL_MAX){
+      double   o_min, o_max;
+
+      /* get the existing range */
+      get_volume_real_range(out_vol, &o_min, &o_max);
+
+      scale_volume(&out_vol, o_min, o_max, out_range[0], out_range[1]);
       }
 
    /* output the result */
@@ -271,12 +271,60 @@ main(int argc, char *argv[])
    return (status);
    }
 
+/* re-scale a volume between a new range                                     */
+/* rescaling is done based upon the formula:                                 */
+/*                                                                           */
+/*                         (max - min)                                       */
+/*    x' = (x - o_min) * --------------- + min                               */
+/*                       (o_max - o_min)                                     */
+/*                                                                           */
+/* or more succinctly (and speedily)                                         */
+/*                                                                           */
+/*    x' = ax + b                                                            */
+/*                                                                           */
+/* where                                                                     */
+/*          (max - min)                                                      */
+/*    a = ---------------                                                    */
+/*        (o_max - o_min)                                                    */
+/*                                                                           */
+/*    b = min - (o_min * a)                                                  */
+/*                                                                           */
+void scale_volume(Volume * vol, double o_min, double o_max, double min, double max)
+{
+   double   value, a, b;
+   int      sizes[MAX_VAR_DIMS];
+   int      i, j, k, v;
+   progress_struct progress;
+
+   get_volume_sizes(*vol, sizes);
+
+   /* rescale the volume */
+   a = (max - min) / (o_max - o_min);
+   b = min - (o_min * a);
+   initialize_progress_report(&progress, FALSE, sizes[Z_IDX], "Rescaling Volume");
+   for(k = sizes[Z_IDX]; k--;){
+      for(j = sizes[Y_IDX]; j--;){
+         for(i = sizes[X_IDX]; i--;){
+            for(v = sizes[V_IDX]; v--;){
+               value = (get_volume_real_value(*vol, k, j, i, v, 0) * a) + b;
+
+               set_volume_real_value(*vol, k, j, i, v, 0, value);
+               }
+            }
+         }
+      update_progress_report(&progress, k + 1);
+      }
+   terminate_progress_report(&progress);
+
+   set_volume_real_range(*vol, min, max);
+   }
 
 /* regrid a volume with an arbitrary path */
 void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size,
                      Volume * out_vol)
 {
    Coord_list coord_buf;
+   progress_struct progress;
    double  *data_buf = NULL;
    size_t   data_buf_alloc_size = 0;
    int      sizes[MAX_VAR_DIMS];
@@ -286,13 +334,14 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
    int      n_stop[3];
    int      c;
    int      i, j, k, v;
-   Volume   counts;
    double   value;
    double   euc_dist;
    double   euc[3];
    double   weight;
    double   c_pos[3];
    long     num_missed;
+   double   min, max;
+   Volume   counts;
 
    int      perm[3] = { X_IDX, Y_IDX, Z_IDX }; /* permutation array for IDX's */
 
@@ -317,16 +366,13 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
       exit(EXIT_FAILURE);
       }
 
-   set_volume_real_range(*out_vol, 0, 1);
-   set_volume_voxel_range(*out_vol, 0, 1);
-
    /* create the "counts" volume */
    counts = copy_volume_definition(*out_vol, MI_ORIGINAL_TYPE, 0, 0, 0);
 
    /* initialize both of them */
-   for(i = sizes[X_IDX]; i--;){
+   for(k = sizes[Z_IDX]; k--;){
       for(j = sizes[Y_IDX]; j--;){
-         for(k = sizes[Z_IDX]; k--;){
+         for(i = sizes[X_IDX]; i--;){
             set_volume_real_value(counts, k, j, i, 0, 0, 0.0);
             for(v = vect_size; v--;){
                set_volume_real_value(*out_vol, k, j, i, v, 0, 0.0);
@@ -352,7 +398,9 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
          exit(EXIT_FAILURE);
          }
 
-      fprintf(stdout, "Got %d co-ords - vect: %d\n", coord_buf->n_pts, vect_size);
+      if(verbose){
+         fprintf(stdout, "Got %d co-ords - vect: %d\n", coord_buf->n_pts, vect_size);
+         }
 
       /* regrid (do the nasty) */
       for(c = 0; c < coord_buf->n_pts; c++){
@@ -372,22 +420,20 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
                }
             }
 
-         /* loop over the neighbours */
+         /* loop over the neighbours, getting euclidian distance */
          c_pos[0] = starts[perm[0]] + (n_start[0] * steps[perm[0]]);
          for(i = n_start[0]; i < n_stop[0]; i++){
+            euc[0] = fabs(c_pos[0] - coord_buf->pts[c].coord[0]);
 
             c_pos[1] = starts[perm[1]] + (n_start[1] * steps[perm[1]]);
             for(j = n_start[1]; j < n_stop[1]; j++){
+               euc[1] = fabs(c_pos[1] - coord_buf->pts[c].coord[1]);
 
                c_pos[2] = starts[perm[2]] + (n_start[2] * steps[perm[2]]);
                for(k = n_start[2]; k < n_stop[2]; k++){
-
-                  /* calc euclidean distance to current point */
-                  euc[0] = fabs(c_pos[0] - coord_buf->pts[c].coord[0]);
-                  euc[1] = fabs(c_pos[1] - coord_buf->pts[c].coord[1]);
                   euc[2] = fabs(c_pos[2] - coord_buf->pts[c].coord[2]);
-                  euc_dist = sqrt(SQR2(euc[0]) + SQR2(euc[1]) + SQR2(euc[2]));
 
+                  euc_dist = sqrt(SQR2(euc[0]) + SQR2(euc[1]) + SQR2(euc[2]));
                   if(euc_dist <= ap_window_radius){
 
                      /* calculate the weighting factor */
@@ -449,17 +495,25 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
       }
 
    /* divide out/counts volume for result */
+   min = DBL_MAX;
+   max = -DBL_MAX;
    num_missed = 0;
-   fprintf(stdout, "Dividing through\n");
-   for(i = sizes[X_IDX]; i--;){
+   initialize_progress_report(&progress, FALSE, sizes[X_IDX], "Dividing through");
+   for(k = sizes[Z_IDX]; k--;){
       for(j = sizes[Y_IDX]; j--;){
-         for(k = sizes[Z_IDX]; k--;){
-            value = get_volume_real_value(counts, k, j, i, 0, 0);
-            if(value != 0){
+         for(i = sizes[X_IDX]; i--;){
+            weight = get_volume_real_value(counts, k, j, i, 0, 0);
+            if(weight != 0){
                for(v = vect_size; v--;){
-                  set_volume_real_value(*out_vol, k, j, i, v, 0,
-                                        get_volume_real_value(*out_vol, k, j, i, v,
-                                                              0) / value);
+                  value = get_volume_real_value(*out_vol, k, j, i, v, 0) / weight;
+                  if(value < min){
+                     min = value;
+                     }
+                  if(value > max){
+                     max = value;
+                     }
+
+                  set_volume_real_value(*out_vol, k, j, i, v, 0, value);
                   }
                }
             else{
@@ -467,12 +521,22 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size, int vect_size
                }
             }
          }
+      update_progress_report(&progress, i + 1);
       }
+   terminate_progress_report(&progress);
+
+   /* set the volumes (initial) range */
+   if(verbose){
+      fprintf(stdout, " | range: [%g:%g]\n", min, max);
+      }
+   set_volume_real_range(*out_vol, min, max);
 
    if(num_missed > 0){
       fprintf(stdout,
-              "Window radius is possibly too small, did not put any data in %d voxels\n",
-              num_missed);
+              "-window_radius possibly too small, didn't put data in %d/%d[%2.2f%%] voxels\n",
+              num_missed, sizes[X_IDX] * sizes[Y_IDX] * sizes[Z_IDX] * sizes[V_IDX],
+              ((float)num_missed /
+               (sizes[X_IDX] * sizes[Y_IDX] * sizes[Z_IDX] * sizes[V_IDX])) * 100);
       }
    end_arb_path();
    }
