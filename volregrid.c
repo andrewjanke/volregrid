@@ -41,6 +41,8 @@
 #define V_IDX 3
 
 /* permutation array for IDX's */
+/* mapping world x(0), y(1) and z(2) to the correct index in the volume voxel order */
+
 static int perm[3] = { X_IDX, Y_IDX, Z_IDX };
 
 static char *std_dimorder[] = { MIzspace, MIyspace, MIxspace };
@@ -229,6 +231,8 @@ int main(int argc, char *argv[])
    long     num_missed;
    double   weight, value;
 
+   Real dummy[3];
+
    int      sizes[MAX_VAR_DIMS];
    double   starts[MAX_VAR_DIMS];
    double   steps[MAX_VAR_DIMS];
@@ -313,8 +317,10 @@ int main(int argc, char *argv[])
       }
 
    /* transpose the geometry arrays */
+   /* out_inf.*[] are in world xyz order, perm[] is the permutation
+      array to map world xyz to the right voxel order in the volume */
    for(i = 0; i < WORLD_NDIMS; i++){
-      sizes[i] = out_inf.nelem[perm[i]];
+      sizes[i] = out_inf.nelem[perm[i]]; /* sizes, starts, steps are in voxel volume order. */
       starts[i] = out_inf.start[perm[i]];
       steps[i] = out_inf.step[perm[i]];
       }
@@ -328,7 +334,9 @@ int main(int argc, char *argv[])
    set_volume_starts(totals, starts);
    set_volume_separations(totals, steps);
    for(i = 0; i < WORLD_NDIMS; i++){
-      set_volume_direction_cosine(totals, i, out_inf.dircos[i]);
+     /* out_inf.dircos is in world x,y,z order, we have to use the perm array to 
+        map each direction to the right voxel axis. */
+      set_volume_direction_cosine(totals, i, out_inf.dircos[perm[i]]);
       }
    alloc_volume_data(totals);
 
@@ -338,9 +346,28 @@ int main(int argc, char *argv[])
    set_volume_starts(weights, starts);
    set_volume_separations(weights, steps);
    for(i = 0; i < WORLD_NDIMS; i++){
-      set_volume_direction_cosine(weights, i, out_inf.dircos[i]);
+      set_volume_direction_cosine(weights, i, out_inf.dircos[perm[i]]);
       }
    alloc_volume_data(weights);
+
+
+   /* down below in regrid_loop, Andrew makes a nasty direct reference to the
+      voxel_to_world transformation in the volume.  This
+      transformation is not necessarily up to date, particularly when
+      non-default direction cosines are used.  In volume_io, the
+      direction cosines are set and a FLAG is also set to indicate
+      that the voxel-to-world xform is not up to date.  If the stanrd
+      volume_io general transform code is used, it checks internally
+      to see if the matrix is up to date, and if not it is recomputed.
+
+      So here, we'll (LC + MK) force an update by calling a general
+      transform.  */
+
+
+   convert_world_to_voxel(weights, 0,0,0, dummy);
+   convert_world_to_voxel(totals,  0,0,0, dummy);
+
+
 
    /* initialize both of them */
    for(k = sizes[Z_IDX]; k--;){
@@ -746,18 +773,45 @@ void regrid_point(Volume * totals, Volume * weights,
    double   euc[3];
    double   c_pos[3];
    int      i, j, k, v;
-   double   coord[3];
+   double   coord[3];		/* target point in mm  coordinates, in X, Y, Z order */
 
-   coord[0] = x;
-   coord[1] = y;
-   coord[2] = z;
+   Transform       dircos, invdircos;
+   Vector          vector;
+   Real            dir[3];
 
-   get_volume_sizes(*totals, sizes);
+   /* the coord used below has to be in mm coordinates in the dircos space of the 
+      target volume.  Hence the manipulations with the vols direction_cosines      */
+   make_identity_transform( &dircos );
+
+   get_volume_direction_cosine( * totals, perm[0],  dir); 
+   fill_Vector ( vector, dir[0], dir[1], dir[2]);
+   set_transform_x_axis( &dircos, &vector);
+
+   get_volume_direction_cosine( * totals, perm[1],  dir); 
+   fill_Vector ( vector, dir[0], dir[1], dir[2]);
+   set_transform_y_axis( &dircos, &vector);
+
+
+   get_volume_direction_cosine( * totals, perm[2],  dir); 
+   fill_Vector ( vector, dir[0], dir[1], dir[2]);
+   set_transform_z_axis( &dircos, &vector);
+
+   for_less(i,0,4) {
+     for_less(j,0,4) {
+       Transform_elem(invdircos,i,j) = Transform_elem(dircos,j,i);
+     }
+   }
+     
+   transform_point( &invdircos,
+		    x, y, z,
+		    &coord[0],&coord[1],&coord[2]);
+
+   get_volume_sizes(*totals, sizes);       /* in volume voxel order, ie z,y,x with x fastest */
    get_volume_separations(*totals, steps);
    get_volume_starts(*totals, starts);
 
    /* figure out the neighbouring voxels start and stop (in voxel co-ordinates) */
-   for(i = 0; i < 3; i++){
+   for(i = 0; i < 3; i++){	/* go through x, y and z */
       start_idx[i] =
          (int)rint((coord[i] - starts[perm[i]] - regrid_radius) / steps[perm[i]]);
       stop_idx[i] = start_idx[i] + rint((regrid_radius * 2) / steps[perm[i]]);
@@ -774,15 +828,15 @@ void regrid_point(Volume * totals, Volume * weights,
    /* loop over the neighbours, getting euclidian distance */
    c_pos[0] = starts[perm[0]] + (start_idx[0] * steps[perm[0]]);
    for(i = start_idx[0]; i < stop_idx[0]; i++){
-      euc[0] = fabs(c_pos[0] - x);
+      euc[0] = fabs(c_pos[0] - coord[0]);
 
       c_pos[1] = starts[perm[1]] + (start_idx[1] * steps[perm[1]]);
       for(j = start_idx[1]; j < stop_idx[1]; j++){
-         euc[1] = fabs(c_pos[1] - y);
+         euc[1] = fabs(c_pos[1] - coord[1]);
 
          c_pos[2] = starts[perm[2]] + (start_idx[2] * steps[perm[2]]);
          for(k = start_idx[2]; k < stop_idx[2]; k++){
-            euc[2] = fabs(c_pos[2] - z);
+            euc[2] = fabs(c_pos[2] - coord[2]);
 
             euc_dist = sqrt(SQR2(euc[0]) + SQR2(euc[1]) + SQR2(euc[2]));
             if(euc_dist <= regrid_radius){
