@@ -12,19 +12,23 @@ struct coord_list_struct {
    int    id;
    char   name[256];
    size_t n_pts;
+   size_t alloc_size;
    Coord *pts;
    };
 typedef struct coord_list_struct *Coord_list;
 
 /* initialise the parser with a filename */
-int init_arb_path(char *fname);
+int init_arb_path(char *coord_fname, char *data_fname);
 
 /* finalize the parser */
 void end_arb_path(void);
 
-/* get some more co-ordinates, returns an empty list when done */
+/* get some co-ordinates, returns an empty list when done      */
 /* a max buffer size can be input (but might not be obeyed..)  */
-Coord_list get_some_arb_path_coords(int max_buf_size);
+Coord_list get_some_arb_path_coords(size_t max_buf_size);
+
+/* get some arb_path data, places data in data_buf             */
+int get_some_arb_path_data(double *data_buf, size_t n_pts, size_t vector_size);
 
 /* functions called by lex */
 /* update the current affine matrix */
@@ -34,11 +38,10 @@ void set_curr_matrix(double mat[12]);
 int new_coord_list(size_t size, char *name);
 
 int add_coord_to_list(int list_id, double x, double y, double z);
-int add_rcoord_to_list(int list_id, double x, double y, double z);
-int add_rrcoord_to_list(int list_id, double x, double y, double z, double rep);
+int add_rcoord_to_list(int list_id, double x, double y, double z, double rep);
 
-int get_list_id_from_name(char *name);
-int call_list(int list_id);
+/* call a list by name */
+int call_list(char *name);
 
 
 

@@ -4,6 +4,8 @@ DIGIT     [0-9]
 LIST_ID   [A-Z]+(_[A-Z]+)*
 REAL      "-"?{DIGIT}+(\.{DIGIT}*)?([eE][-+]?{DIGIT}+)?
 INT       "-"?{DIGIT}+
+COORD     {REAL}\,{REAL}\,{REAL}
+RCOORD    "@["{COORD}"]"
 
 %{ 
    #include <math.h>
@@ -12,10 +14,11 @@ INT       "-"?{DIGIT}+
    
    /* function prototypes */
    int get_coord_from_str(char *str, double *x, double *y, double *z);
-   int get_num_reps_from_str(char *str);
+   int get_reps_from_str(char *str);
+   void yyerror(void);
    
    /* global parsing vars */
-   int yylineno;
+   int line_num = 1;
    int c_list_id = 0;
    int id;
    char list_name[256];
@@ -39,121 +42,132 @@ INT       "-"?{DIGIT}+
 
 %%
 
-<*>#.*\n               /* gobble up comments  */
-<*>[ \t\n]+            /* eat up whitespace   */
+<*>#.*                 /* gobble up comments  */
+<*>[ \t]+              /* eat up whitespace   */
+<*>\n                  { line_num++; }  /* count lines */
 
  /* co-ordinates */
-{REAL},{REAL},{REAL}         { printf("***| Coord  ");
-                               if(get_coord_from_str(yytext, &x, &y, &z) && 
-                                  add_coord_to_list(0, x, y, z)){
-                                  printf("  -- %g %g %g\n", x, y, z);
-                                  return 1;
-                                  }
-                               }
-@{REAL},{REAL},{REAL}        { printf("***| RCoor  ");
-                               yytext++;
-                               if(get_coord_from_str(yytext, &x, &y, &z) && 
-                                  add_rcoord_to_list(0, x, y, z)){
-                                  printf("  -- %g %g %g\n", x, y, z);
-                                  return 1;
-                                  }
-                               }
-@{REAL},{REAL},{REAL}:{REAL} { printf("***| RRCoo   %s\n", yytext);
-                               yytext++;
-                               if(get_coord_from_str(yytext, &x, &y, &z)){
-                                  
-                                  reps = get_num_reps_from_str(yytext);
-                                  add_rrcoord_to_list(0, x, y, z, reps);
-                                  printf("  -- %g %g %g\n", x, y, z);
-                                  return 1;
-                                  }
-                               }
+{COORD}                { printf("***| Coord  ");
+                         if(get_coord_from_str(yytext, &x, &y, &z) && 
+                            add_coord_to_list(0, x, y, z)){
+                            printf("  -- %g %g %g\n", x, y, z);      
+                            return 1;                                
+                            }                                        
+                         else{                                       
+                            yyerror();                               
+                            }                                        
+                         }                                           
+{RCOORD}               { printf("***| RCoor  ");
+                         yytext+=2;                                         
+                         if(get_coord_from_str(yytext, &x, &y, &z) &&       
+                            add_rcoord_to_list(0, x, y, z, 1)){             
+                            printf("  -- %g %g %g\n", x, y, z);             
+                            return 1;                                       
+                            }                                               
+                         else{                                              
+                            yyerror();                                      
+                            }                                               
+                         }                                                  
+{RCOORD}\*{REAL}       { printf("***| RRCoo   %s", yytext);
+                         yytext+=2;                                                          
+                         if(get_coord_from_str(yytext, &x, &y, &z) &&                        
+                            add_rcoord_to_list(0, x, y, z, get_reps_from_str(yytext))){      
+                            printf("  -- %g %g %g\n", x, y, z);                              
+                            return 1;                                                        
+                            }                                                                
+                         else{                                                               
+                            yyerror();                                                       
+                            }                                                                
+                         }                                                                   
 
  /* parameters */
-DIMENSIONS\:      |
-SLICES\:          printf("***| INT KEYWORD        %s\n", yytext);
-SLICES_START\:    |
-SLICES_STEP\:     printf("***| REAL KEYWORD       %s\n", yytext);
-SLICES_DIM\:      printf("***| STRING KEYWORD     %s\n", yytext);
+DIMENSIONS\:           |
+SLICES\:               printf("***| INT KEYWORD        %s\n", yytext);
+SLICES_START\:         |
+SLICES_STEP\:          printf("***| REAL KEYWORD       %s\n", yytext);
+SLICES_DIM\:           printf("***| STRING KEYWORD     %s\n", yytext);
 
  /* Matrix */
-"M = ["         { mat_pos = 0;
-                  BEGIN(MATRIX);
-                  }
+"M = ["                { mat_pos = 0;
+                         BEGIN(MATRIX);
+                         }
 <MATRIX>{
-   {REAL}       { MAT[mat_pos++] = atof(yytext); }
-   ]            { if(mat_pos != 12){
-                     fprintf(stdout, "Less than 12 elements found in Matrix!\n");
-                     return 0;
-                     }
-                  set_curr_matrix(MAT);
-                  BEGIN(INITIAL);
-                  }
+   {REAL}              { MAT[mat_pos++] = atof(yytext); }
+   ]                   { if(mat_pos != 12){
+                            fprintf(stdout, "Less than 12 elements found in Matrix!\n");
+                            yyerror();
+                            }
+                         set_curr_matrix(MAT);
+                         BEGIN(INITIAL);
+                         }
    }
 
  /* list definition */
-LIST                   { BEGIN(LIST);                        }
-<LIST>{
-   {LIST_ID}           { printf("\n***| FOUND LIST:  %s\n", yytext);    
+LIST\ {LIST_ID}        { yytext += 5;
+                         printf("***| LIST:  %s\n", yytext);    
                          c_list_id = new_coord_list(0, yytext);
-                         printf("\n***| GOT ID:  %d\n", c_list_id); 
+                         if(c_list_id == 0){
+                            fprintf(stderr, "List %s cannot be redefined\n", yytext);
+                            yyerror();
+                            }
+                        
+                         BEGIN(LIST);
                          }
+<LIST>{
    \{                  
-   {REAL},{REAL},{REAL}          { printf("***| LCoord  %d %s\n", c_list_id, yytext);
-                                   if(!get_coord_from_str(yytext, &x, &y, &z) || 
-                                      !add_coord_to_list(c_list_id, x, y, z)){
-                                      printf("  -- %g %g %g\n", x, y, z);
-                                      return 0;
-                                      }
-                                   }
-   @{REAL},{REAL},{REAL}         { printf("***| LRCoor   %s\n", yytext);
-                                   yytext++;
-                                   if(!get_coord_from_str(yytext, &x, &y, &z) || 
-                                      !add_rcoord_to_list(c_list_id, x, y, z)){
-                                      printf("  -- %g %g %g\n", x, y, z);
-                                      return 0;
-                                      }
-                                   }
-   @{REAL},{REAL},{REAL}:{REAL}  { printf("***| LRRCoo   %s\n", yytext);
-                                   yytext++;
-                                   if(get_coord_from_str(yytext, &x, &y, &z)){
-
-                                      reps = get_num_reps_from_str(yytext);
-                                      add_rrcoord_to_list(c_list_id, x, y, z, reps);
-                                      printf("  -- %g %g %g\n", x, y, z);
-                                      return 1;
-                                      }
-                                   }
-   \}                  { printf("***|   END LIST\n\n");
+   {COORD}             { printf("***| LCoord   %d", c_list_id);
+                         if(get_coord_from_str(yytext, &x, &y, &z) &&           
+                            add_coord_to_list(c_list_id, x, y, z)){             
+                            printf("  -- %g %g %g\n", x, y, z);                 
+                            }                                                   
+                          else{                                                 
+                            yyerror();                                          
+                            }                                                   
+                         }                                                      
+   {RCOORD}            { printf("***| LRCoord  %d", c_list_id);
+                         yytext+=2;                                              
+                         if(get_coord_from_str(yytext, &x, &y, &z) &&            
+                            add_rcoord_to_list(c_list_id, x, y, z, 1)){          
+                            printf("  -- %g %g %g\n", x, y, z);                  
+                            }                                                    
+                          else{                                                  
+                            yyerror();                                           
+                            }                                                    
+                         }                                                       
+   {RCOORD}\*{REAL}    { printf("***| LRRCoord %d", c_list_id);
+                         yytext+=2;                                                                      
+                         if(get_coord_from_str(yytext, &x, &y, &z) &&                                    
+                            add_rcoord_to_list(c_list_id, x, y, z, get_reps_from_str(yytext))){          
+                            printf("  -- %g %g %g\n", x, y, z);                                          
+                            }                                                                            
+                          else{                                                                          
+                            yyerror();                                                                   
+                            }                                                                            
+                         }                                                                               
+   \}                  { printf("***|   END LIST\n");
                          BEGIN(INITIAL);
                          }
    }
 
  /* list call */
-CALL                   { BEGIN(CALL);                           }
-<CALL>{LIST_ID}        { printf("***| Calling list %s\n", yytext); 
-                         id = get_list_id_from_name(yytext);
-                         
-                         printf("Got list ID: %d (%s)\n", id, yytext); 
-                         if(id != 0 && call_list(id)){
-                            BEGIN(INITIAL);
+CALL\ {LIST_ID}        { yytext += 5;
+                         printf("***| Calling list %s\n", yytext);
+                         if(call_list(yytext)){
                             return 1;
                             }
                          else{
-                            printf("Couldn't find list %s\n", yytext);
+                            yyerror();
                             }
-                         
-                         BEGIN(INITIAL);
                          }
 
  /* default case */
-<*>.                   { printf( "***| Unrecognized character: %s\n", yytext );
-                         }
+<*>.                   { yyerror(); }
 
 %%
 
-void yyerror(char *s){
-   fprintf(stderr, "line %d: %s\n", yylineno, s);
+void yyerror(void){
+   fprintf(stderr, "Error at line %d: %s\n", line_num, yytext);
+   exit(EXIT_FAILURE);
    }
  
 int yywrap(){  
@@ -184,15 +198,15 @@ int get_coord_from_str(char *str, double *x, double *y, double *z){
    return 1;
    }
 
-int get_num_reps_from_str(char *str){
+int get_reps_from_str(char *str){
    
    /* get to the number in question */
-   while(str[0] != ':'){
+   while(str[0] != '*'){
       str++;
       }
    str++;
    
-   return atof(str);
+   return atoi(str);
    }
 
 int yyflex_init(char *fname){

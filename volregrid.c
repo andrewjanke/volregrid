@@ -27,13 +27,39 @@
 #include <time_stamp.h>
 #include "arb_path_io.h"
 
+#define NO_VALUE DBL_MAX               /* Constant to flag fact that value not set */
+#define DEF_BOOL -1
+#define X_IDX 0
+#define Y_IDX 1
+#define Z_IDX 2
+#define V_IDX 3
+
+/* function prototypes */
+int      read_config_file(char *filename, char *args[]);
+
 int      verbose = FALSE;
-int      debug   = FALSE;
+int      debug = FALSE;
 int      clobber = FALSE;
 int      regrid_dim = 3;
 char    *arb_path_cfg_fn = NULL;
-nc_type  dtype = NC_FLOAT;
-int      is_signed = FALSE;
+int      arb_path_buff_size = 100;
+nc_type  in_dtype = NC_FLOAT;
+int      in_is_signed = FALSE;
+
+/* output file parameters */
+char    *out_config_fn = NULL;
+nc_type  out_dtype = NC_UNSPECIFIED;
+int      out_is_signed = DEF_BOOL;
+double   valid_range[2] = { -DBL_MAX, DBL_MAX };
+double   real_range[2] = { 0, 1 };
+double   out_start[MAX_VAR_DIMS] = { -50, -50, -50 };
+double   out_step[MAX_VAR_DIMS] = { 1, 1, 1 };
+int      out_length[MAX_VAR_DIMS] = { 100, 100, 100, 1 };
+double   out_dircos[3][3] = {
+   1, 0, 0,
+   0, 1, 0,
+   0, 0, 1
+};
 
 static ArgvInfo argTable[] = {
    {"-verbose", ARGV_CONSTANT, (char *)TRUE, (char *)&verbose,
@@ -43,36 +69,88 @@ static ArgvInfo argTable[] = {
    {"-clobber", ARGV_CONSTANT, (char *)TRUE, (char *)&clobber,
     "Clobber existing files."},
 
+   {NULL, ARGV_HELP, NULL, NULL, "\nRaw Infile Options"},
+   {"-byte", ARGV_CONSTANT, (char *)NC_BYTE, (char *)&in_dtype,
+    "Input data is byte data."},
+   {"-short", ARGV_CONSTANT, (char *)NC_SHORT, (char *)&in_dtype,
+    "Input data is short integer data."},
+   {"-int", ARGV_CONSTANT, (char *)NC_INT, (char *)&in_dtype,
+    "Input data is 32-bit integer"},
+   {"-float", ARGV_CONSTANT, (char *)NC_FLOAT, (char *)&in_dtype,
+    "Input data is single-precision data. (Default)"},
+   {"-double", ARGV_CONSTANT, (char *)NC_DOUBLE, (char *)&in_dtype,
+    "Input data is double-precision data."},
+   {"-signed", ARGV_CONSTANT, (char *)TRUE, (char *)&in_is_signed,
+    "Input data is signed integer data."},
+   {"-ounsigned", ARGV_CONSTANT, (char *)FALSE, (char *)&in_is_signed,
+    "Input data is unsigned integer data."},
+   {"-range", ARGV_FLOAT, (char *)2, (char *)valid_range,
+    "Valid range of input values (default = full range)."},
+   {"-real_range", ARGV_FLOAT, (char *)2, (char *)real_range,
+    "Real range of input values (ignored for floating-point types)."},
+
+
    {NULL, ARGV_HELP, NULL, NULL, "\nOutfile Options"},
-   {"-byte", ARGV_CONSTANT, (char *)NC_BYTE, (char *)&dtype,
+   {"-outconfig", ARGV_STRING, (char *)1, (char *)&out_config_fn,
+    "Get the output geometry from the input filename (overrides args below)"},
+   {"-obyte", ARGV_CONSTANT, (char *)NC_BYTE, (char *)&out_dtype,
     "Write out byte data."},
-   {"-short", ARGV_CONSTANT, (char *)NC_SHORT, (char *)&dtype,
+   {"-oshort", ARGV_CONSTANT, (char *)NC_SHORT, (char *)&out_dtype,
     "Write out short integer data."},
-   {"-long", ARGV_CONSTANT, (char *)NC_LONG, (char *)&dtype,
-    "Write out long integer data."},
-   {"-float", ARGV_CONSTANT, (char *)NC_FLOAT, (char *)&dtype,
+   {"-int", ARGV_CONSTANT, (char *)NC_INT, (char *)&in_dtype,
+    "Input data is 32-bit integer"},
+   {"-ofloat", ARGV_CONSTANT, (char *)NC_FLOAT, (char *)&out_dtype,
     "Write out single-precision data. (Default)"},
-   {"-double", ARGV_CONSTANT, (char *)NC_DOUBLE, (char *)&dtype,
+   {"-odouble", ARGV_CONSTANT, (char *)NC_DOUBLE, (char *)&out_dtype,
     "Write out double-precision data."},
-   {"-signed", ARGV_CONSTANT, (char *)TRUE, (char *)&is_signed,
+   {"-osigned", ARGV_CONSTANT, (char *)TRUE, (char *)&out_is_signed,
     "Write signed integer data."},
-   {"-unsigned", ARGV_CONSTANT, (char *)FALSE, (char *)&is_signed,
+   {"-ounsigned", ARGV_CONSTANT, (char *)FALSE, (char *)&out_is_signed,
     "Write unsigned integer data."},
+   {"-xstart", ARGV_FLOAT, (char *)1, (char *)&out_start[X_IDX],
+    "Starting coordinate for x dimension."},
+   {"-ystart", ARGV_FLOAT, (char *)1, (char *)&out_start[Y_IDX],
+    "Starting coordinate for y dimension."},
+   {"-zstart", ARGV_FLOAT, (char *)1, (char *)&out_start[Z_IDX],
+    "Starting coordinate for z dimension."},
+   {"-xstep", ARGV_FLOAT, (char *)1, (char *)&out_step[X_IDX],
+    "Step size for x dimension."},
+   {"-ystep", ARGV_FLOAT, (char *)1, (char *)&out_step[Y_IDX],
+    "Step size for y dimension."},
+   {"-zstep", ARGV_FLOAT, (char *)1, (char *)&out_step[Z_IDX],
+    "Step size for z dimension."},
+   {"-xlength", ARGV_INT, (char *)1, (char *)&out_length[X_IDX],
+    "Number of samples in x dimension."},
+   {"-ylength", ARGV_INT, (char *)1, (char *)&out_length[Y_IDX],
+    "Number of samples in y dimension."},
+   {"-zlength", ARGV_INT, (char *)1, (char *)&out_length[Z_IDX],
+    "Number of samples in z dimension."},
+   {"-vector_length", ARGV_INT, (char *)1, (char *)&out_length[V_IDX],
+    "Number of samples in the vector dimension."},
+   {"-xdircos", ARGV_FLOAT, (char *)3, (char *)out_dircos[X_IDX],
+    "Direction cosines for x dimension."},
+   {"-ydircos", ARGV_FLOAT, (char *)3, (char *)out_dircos[Y_IDX],
+    "Direction cosines for y dimension."},
+   {"-zdircos", ARGV_FLOAT, (char *)3, (char *)out_dircos[Z_IDX],
+    "Direction cosines for z dimension."},
+
 
    {NULL, ARGV_HELP, NULL, NULL, "\nRegridding options"},
    {"-2D", ARGV_CONSTANT, (char *)2, (char *)&regrid_dim,
     "Regrid slice by slice (Default 3D)."},
 
-   {"-arb_path_cfg", ARGV_STRING, (char *)1, (char *)&arb_path_cfg_fn,
+   {"-arb_path", ARGV_STRING, (char *)1, (char *)&arb_path_cfg_fn,
     "Regrid data using an arbitrary path from the input filename"},
+   {"-arb_path_coord_buffer", ARGV_INT, (char *)1, (char *)&arb_path_buff_size,
+    "Size of arbitrary path co-ordinate buffer"},
 
 
    {NULL, ARGV_HELP, NULL, NULL, ""},
    {NULL, ARGV_END, NULL, NULL, NULL}
 };
 
-char    *output_dimorder[] = { MIzspace, MIyspace, MIxspace };
-char    *output_dimorder_v[] = { MIzspace, MIyspace, MIxspace, MIvector_dimension };
+char    *std_dimorder[] = { MIzspace, MIyspace, MIxspace };
+char    *std_dimorder_v[] = { MIzspace, MIyspace, MIxspace, MIvector_dimension };
 
 main(int argc, char *argv[])
 {
@@ -80,13 +158,6 @@ main(int argc, char *argv[])
    char    *history;
    Status   status;
    Volume   out_vol;
-   int      c;
-   
-   Coord_list tmp;
-
-//   Real     min, max;
-
-//   minc_input_options in_ops;
 
    /* get the history string */
    history = time_stamp(argc, argv);
@@ -110,104 +181,115 @@ main(int argc, char *argv[])
               out_fn);
       exit(EXIT_FAILURE);
       }
-   
-   /* arbitrary path */
-   if(arb_path_cfg_fn != NULL){
-      
-      /* check for the config file */
-      if(!file_exists(arb_path_cfg_fn)){
-         fprintf(stderr, "%s: Couldn't find config file %s.\n\n", argv[0], arb_path_cfg_fn);
+
+   /* set up parameters for reconstruction */
+   if(out_dtype == NC_UNSPECIFIED){
+      out_dtype = in_dtype;
+      }
+   if(out_is_signed == DEF_BOOL){
+      out_is_signed = in_is_signed;
+      }
+
+   /* check vector dimension size */
+   if(out_length[V_IDX] < 1){
+      fprintf(stderr, "%s: -vector_length must be 1 or greater.\n\n", argv[0]);
+      exit(EXIT_FAILURE);
+      }
+
+
+   /* read in the output file config from a file is specified */
+   if(out_config_fn != NULL){
+      int      ext_args_c;
+      char    *ext_args[32];           /* max possible is 32 arguments */
+
+      ext_args_c = read_config_file(out_config_fn, ext_args);
+      if(ParseArgv(&ext_args_c, ext_args, argTable,
+                    ARGV_DONT_SKIP_FIRST_ARG || ARGV_NO_LEFTOVERS || ARGV_NO_DEFAULTS)){
+         fprintf(stderr, "\nError in parameters in %s\n", out_config_fn);
          exit(EXIT_FAILURE);
          }
-      
+      }
+
+   /* create the output volume */
+   out_vol = create_volume((out_length[V_IDX] > 1) ? 4 : 3,
+                           (out_length[V_IDX] > 1) ? std_dimorder_v : std_dimorder,
+                           out_dtype, out_is_signed, 0.0, 0.0);
+   set_volume_sizes(out_vol, out_length);
+   set_volume_starts(out_vol, out_start);
+   set_volume_separations(out_vol, out_step);
+   set_volume_real_range(out_vol, valid_range[0], valid_range[1]);
+   alloc_volume_data(out_vol);
+
+   /* print some pretty output */
+   if(verbose){
+
+      fprintf(stdout, " | Input data:      %s\n", in_fn);
+      fprintf(stdout, " | Arb path:        %s\n", arb_path_cfg_fn);
+      fprintf(stdout, " | Valid Range:    [%8.3f:%8.3f]\n", valid_range[0],
+              valid_range[1]);
+      fprintf(stdout, " | Real Range:     [%8.3f:%8.3f]\n", real_range[0], real_range[1]);
+      fprintf(stdout, " | Output file:     %s\n", out_fn);
+      }
+
+
+   /* arbitrary path */
+   if(arb_path_cfg_fn != NULL){
+      Coord_list coord_buf;
+      double  *data_buf = NULL;
+      size_t   data_buf_alloc_size = 0;
+
+      /* check for the config file */
+      if(!file_exists(arb_path_cfg_fn)){
+         fprintf(stderr, "%s: Couldn't find config file %s.\n\n", argv[0],
+                 arb_path_cfg_fn);
+         exit(EXIT_FAILURE);
+         }
+
       /* initialise the parser with the config file */
-      if(!init_arb_path(arb_path_cfg_fn)){
+      if(!init_arb_path(arb_path_cfg_fn, in_fn)){
          fprintf(stderr, "%s: Failed to init arb_path, this isn't good\n", argv[0]);
          exit(EXIT_FAILURE);
          }
-   
-      /* get some data */
-      tmp = get_some_arb_path_coords(100);
-      printf("CO-ORDS\n");
-      print_coord_list(tmp);
-      
-   //   tmp = get_some_arb_path_coords(10);
-      
-   //   print_coord_list(tmp);
-      
-      end_arb_path();
-      
-      }
-   exit(0);
 
-//   if(status != OK){
-//      fprintf(stderr, "Problems reading: %s\n", in_fn);
-//      exit(EXIT_FAILURE);
-//      }
+      /* get some co-ordinates */
+      coord_buf = get_some_arb_path_coords(arb_path_buff_size);
+      while(coord_buf->n_pts != 0){
+         
+      //   print_coord_list(coord_buf);
+         fprintf(stdout, "Got %d co-ords\n", coord_buf->n_pts);
 
-//   if(verbose){
-//      Real     min_value, max_value;
-//
-//      get_volume_real_range(data, &min_value, &max_value);
-//
-//      fprintf(stdout, " | Input file:     %s\n", in_fn);
-//      fprintf(stdout, " | Input ndims:    %d\n", in_ndims);
-//      fprintf(stdout, " | min/max:        [%8.3f:%8.3f]\n", min_value, max_value);
-//      fprintf(stdout, " | Output files:\n");
-//      for(c = 0; c < MAX_OUTFILES; c++){
-//         if(outfiles[c] != NULL){
-//            fprintf(stdout, " |   [%d]:         %s => %s\n", c, out_names[c],
-//                    outfiles[c]);
-//            }
+         /* grow data_buf if we have to */
+         if(coord_buf->n_pts > data_buf_alloc_size){
+            data_buf_alloc_size = coord_buf->n_pts;
+            data_buf = (double *)realloc(data_buf, data_buf_alloc_size * out_length[V_IDX]);
+            fprintf(stdout, "Allocated %d x %d = %d bytes to data_buf\n", data_buf_alloc_size,
+                 out_length[V_IDX], data_buf_alloc_size * out_length[V_IDX]);
+            }
+         
+         /* get the data */
+         if(!get_some_arb_path_data(data_buf, coord_buf->n_pts, out_length[V_IDX])){
+            fprintf(stderr, "failed getting data\n");
+            }
+      
+
+         /* regrid (do the nasty) */
+//      if(regrid_arbitrary_path(out_vol, in_fn, path_data) != OK){
+//         print_error("%s: Problems regridding data\n", argv[0]);
+//         exit(EXIT_FAILURE);
 //         }
-//      fprintf(stdout, " | FFT order:      %d\n", fft_dim);
-//      }
-
-
-   /* create the output volume */
-   {
-      Real     min, max;
-
-      int      sizes[4];
-      Real     starts[4];
-      Real     separations[4];
-
-      for(c = 0; c < 3; c++){
-         sizes[c] = 10;
-         starts[c] = -5;
-         separations[c] = 1;
+         
+         /* get the next lot of co-ordinates */
+         coord_buf = get_some_arb_path_coords(arb_path_buff_size);
          }
 
-      /* setup frequency dimension */
-      sizes[3] = 2;
-      starts[3] = 0;
-      separations[3] = 1;
-
-      min = 0;
-      max = 10;
-
-      /* define new out_vol volume  */
-      out_vol = create_volume(4, output_dimorder_v, NC_FLOAT, TRUE, 0.0, 0.0);
-      set_volume_sizes(out_vol, sizes);
-      set_volume_starts(out_vol, starts);
-      set_volume_separations(out_vol, separations);
-      set_volume_real_range(out_vol, min, max);
-
-      /* allocate space for out_vol */
-      alloc_volume_data(out_vol);
+      end_arb_path();
       }
-
-   /* regrid (do the nasty) */
-//   if(regrid_arbitrary_path(out_vol, in_fn, path_data) != OK){
-//      print_error("%s: Problems regridding data\n", argv[0]);
-//      exit(EXIT_FAILURE);
-//      }
 
    /* output the result */
    if(verbose){
       fprintf(stdout, "Outputting %s...\n", out_fn);
       }
-   status = output_volume(out_fn, dtype, is_signed, 0, 0, out_vol, history, NULL);
+   status = output_volume(out_fn, out_dtype, out_is_signed, 0, 0, out_vol, history, NULL);
    if(status != OK){
       print_error("Problems outputing: %s", out_fn);
       }
@@ -218,3 +300,53 @@ main(int argc, char *argv[])
 
 
 /* regrid a volume with an arbitrary path */
+
+
+
+/* convert input file to equiv C/L, return number of args read */
+int read_config_file(char *filename, char *args[])
+{
+   FILE    *fp;
+   int      ch;
+   char     tmp[256];
+   int      nargs = 0;
+   int      ichar = 0;
+   int      in_comment = FALSE;
+
+   /* Open the file */
+   if((fp = fopen(filename, "r")) == NULL){
+      fprintf(stderr, "Unable to open options file %s\n\n", filename);
+      exit(EXIT_FAILURE);
+      }
+
+   /* Read in the arguments, skipping comments and poking them in an array */
+   while ((ch = getc(fp)) != EOF){
+      switch (ch){
+      case '#':
+         in_comment = TRUE;
+         break;
+
+      case '\n':
+         in_comment = FALSE;
+      default:
+         if(!in_comment){
+            if(isspace(ch)){
+               /* we have a complete arg, copy it over */
+               if(ichar != 0){
+                  tmp[ichar++] = '\0';
+                  args[nargs] = (char *)malloc(ichar * sizeof(*args[nargs]));
+                  strncpy(args[nargs], tmp, ichar);
+
+                  ichar = 0;
+                  nargs++;
+                  }
+               }
+            else{
+               tmp[ichar++] = ch;
+               }
+            }
+         }
+      }
+   fclose(fp);
+   return nargs;
+   }
