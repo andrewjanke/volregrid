@@ -1,5 +1,6 @@
 PROGS = volregrid
-OBJS = $(PROGS:=.o) arb_path_io.o lex.o
+HEADERS = arb_path_io.h
+OBJS = $(PROGS:=.o) $(HEADERS:.h=.o) lex.o
 
 LEX=flex
 CC=cc
