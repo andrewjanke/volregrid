@@ -2,7 +2,7 @@
 AC_PREREQ([2.57])
 
 # The arguments are package name, and package version.
-AC_INIT([volregrid],[1.1.1],[Andrew Janke <rotor@cmr.uq.edu.au>])
+AC_INIT([volregrid],[1.2],[Andrew Janke <rotor@cmr.uq.edu.au>])
 AC_CONFIG_SRCDIR([volregrid.c])
 
 AM_INIT_AUTOMAKE
