@@ -45,6 +45,8 @@
 #define Z_IDX 0
 #define V_IDX 3
 
+#define LARGE_INITIAL_WEIGHT  1.0e06
+
 /* permutation array for IDX's */
 /* mapping world x(0), y(1) and z(2) to the correct index in the volume voxel order */
 
@@ -58,7 +60,8 @@ typedef enum {
    UNSPECIFIED_FUNC = 0,
    KAISERBESSEL_FUNC,
    GAUSSIAN_FUNC,
-   NEAREST_FUNC
+   NEAREST_FUNC,
+   LINEAR_FUNC
    } Regrid_op;
 
 /* function prototypes */
@@ -213,7 +216,9 @@ static ArgvInfo argTable[] = {
    {"-kaiser_bessel", ARGV_CONSTANT, (char *)KAISERBESSEL_FUNC, (char *)&regrid_type,
     "Use a Kaiser-Bessel convolution kernel for the reconstruction."},
    {"-gaussian", ARGV_CONSTANT, (char *)GAUSSIAN_FUNC, (char *)&regrid_type,
-    "Use a Gaussian convolution kernel for the reconstruction."},
+    "Use a Gaussian convolution kernel for the reconstruction. (Default)"},
+   {"-linear", ARGV_CONSTANT, (char *)LINEAR_FUNC, (char *)&regrid_type,
+    "Use linear interpolation for the reconstruction."},
    {"-nearest", ARGV_CONSTANT, (char *)NEAREST_FUNC, (char *)&regrid_type,
     "Use nearest neighbour reconstruction."},
    {"-sigma", ARGV_FLOAT, (char *)1, (char *)&regrid_sigma,
@@ -240,13 +245,19 @@ int main(int argc, char *argv[])
    double   w_min, w_max;
    long     num_missed;
    double   weight, value;
+   double   initial_weight;
 
    Real     dummy[3];
 
    int      sizes[MAX_VAR_DIMS];
    double   starts[MAX_VAR_DIMS];
    double   steps[MAX_VAR_DIMS];
+   
+   long     t = 0;
 
+   /* start the time counter*/
+   current_realtime_seconds();
+   
    /* get the history string */
    history = time_stamp(argc, argv);
 
@@ -376,11 +387,19 @@ int main(int argc, char *argv[])
 //   convert_world_to_voxel(totals, (Real) 0, (Real) 0, (Real) 0, dummy);
 
    fprintf(stderr, "2Sizes: [%d:%d:%d] \n", sizes[perm[0]], sizes[perm[1]], sizes[perm[2]]);
-   /* initialize both of them */
+   
+   /* initialize weights to be arbitray large value if using NEAREST interpolation and not
+   arbitrary path, otherwise initialize them to zero */
+   if(regrid_type == NEAREST_FUNC && ap_coord_fn == NULL) {
+      initial_weight = LARGE_INITIAL_WEIGHT;
+   } else {
+      initial_weight = 0.0;
+   }
+   /* initialize weights and totals */   
    for(k = sizes[Z_IDX]; k--;){
       for(j = sizes[Y_IDX]; j--;){
          for(i = sizes[X_IDX]; i--;){
-            set_volume_real_value(weights, k, j, i, 0, 0, 0.0);
+            set_volume_real_value(weights, k, j, i, 0, 0, initial_weight);
             for(v = vect_size; v--;){
                set_volume_real_value(totals, k, j, i, v, 0, 0.0);
                }
@@ -511,7 +530,10 @@ int main(int argc, char *argv[])
 
    delete_volume(totals);
    delete_volume(weights);
-
+   
+   t = current_realtime_seconds();
+   printf("Total reconstruction time: %d hours %d minutes %d seconds\n", t/3600, (t/60)%60, t%60);
+   
    return (EXIT_SUCCESS);
    }
 
@@ -971,8 +993,13 @@ void regrid_point(Volume * totals, Volume * weights,
                   break;
 
                case NEAREST_FUNC:
-                  fprintf(stderr, "Erk! -nearest is not implemented yet\n");
-                  exit(EXIT_FAILURE);
+                  //fprintf(stderr, "Erk! -nearest is not implemented yet\n");
+                  //exit(EXIT_FAILURE);
+                  weight = euc_dist;
+                  break;
+
+               case LINEAR_FUNC:
+                  weight = euc_dist;
                   break;
 
                case KAISERBESSEL_FUNC:
@@ -994,20 +1021,31 @@ void regrid_point(Volume * totals, Volume * weights,
                   }
 
                /* set data values */
-               for(v = 0; v < v_size; v++){
-                  value = get_volume_real_value(*totals, k, j, i, v, 0);
-                  set_volume_real_value(*totals, k, j, i, v, 0,
-                                        value + (data_buf[0 + v] * weight));
-           //       fprintf(stderr, "At point: %d:%d:%d:%d   ss [%d:%d:%d]-[%d:%d:%d]  value: %g (%g)\n", 
-           //               i, j, k, v, 
-           //               start_idx[0], start_idx[1], start_idx[2], 
-           //               stop_idx[0], stop_idx[1], stop_idx[2], 
-           //               value + (data_buf[0 + v]),  weight);
+               if(regrid_type == NEAREST_FUNC) {
+                  value = get_volume_real_value(*weights, k, j, i, 0, 0);
+                  if(weight < value) {
+                     set_volume_real_value(*weights, k, j, i, 0, 0, weight);
+                     for(v = 0; v < v_size; v++) {
+                        set_volume_real_value(*totals, k, j, i, v, 0,
+                                               data_buf[0 + v] * weight);
+                     }
                   }
-
-               /* increment count value */
-               value = get_volume_real_value(*weights, k, j, i, 0, 0);
-               set_volume_real_value(*weights, k, j, i, 0, 0, value + weight);
+               } else {
+                  for(v = 0; v < v_size; v++){
+                     value = get_volume_real_value(*totals, k, j, i, v, 0);
+                     set_volume_real_value(*totals, k, j, i, v, 0,
+                                          value + (data_buf[0 + v] * weight));
+            //       fprintf(stderr, "At point: %d:%d:%d:%d   ss [%d:%d:%d]-[%d:%d:%d]  value: %g (%g)\n", 
+            //               i, j, k, v, 
+            //               start_idx[0], start_idx[1], start_idx[2], 
+            //               stop_idx[0], stop_idx[1], stop_idx[2], 
+            //               value + (data_buf[0 + v]),  weight);
+                     }
+   
+                  /* increment count value */
+                  value = get_volume_real_value(*weights, k, j, i, 0, 0);
+                  set_volume_real_value(*weights, k, j, i, 0, 0, value + weight);
+                  }
                }
 
             c_pos[2] += steps[perm[2]];
