@@ -1,12 +1,11 @@
-/* volregrid.c                                                               */
-/*                                                                           */
-/* Performs regridding on a series of input MINC volumes or raw input data   */
+/* volregrid.c                                                                */
 /*                                                                            */
-/* Andrew Janke - rotor@cmr.uq.edu.au                                         */
+/* Performs regridding on a series of input MINC volumes or raw input data    */
+/*                                                                            */
+/* Andrew Janke - a.janke@gmail.com                                           */
 /* Mark Griffin - mark.griffin@cmr.uq.edu.au                                  */
 /* Center for Magnetic Resonance                                              */
 /* The University of Queensland                                               */
-/* http://www.cmr.uq.edu.au/~rotor                                            */
 /*                                                                            */
 /* Copyright (C) 2003 Andrew Janke and Mark Griffin                           */
 /* This program is free software; you can redistribute it and/or              */
@@ -22,6 +21,7 @@
 /* You should have received a copy of the GNU General Public License          */
 /* along with this program; if not, write to the Free Software                */
 /* Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. */
+
 
 #include <config.h>
 #include <math.h>
@@ -45,11 +45,10 @@
 #define Z_IDX 0
 #define V_IDX 3
 
-#define LARGE_INITIAL_WEIGHT  1.0e06
+#define LARGE_INITIAL_WEIGHT  DBL_MAX
 
 /* permutation array for IDX's */
 /* mapping world x(0), y(1) and z(2) to the correct index in the volume voxel order */
-
 static int perm[3] = { X_IDX, Y_IDX, Z_IDX };
 
 static char *std_dimorder[] = { MIzspace, MIyspace, MIxspace };
@@ -99,7 +98,7 @@ static char *ap_coord_fn = NULL;
 static double regrid_range[2] = { -DBL_MAX, DBL_MAX };
 static double regrid_radius[3] = { 2.0, 2.0, 2.0 };
 static Regrid_op regrid_type = GAUSSIAN_FUNC;
-static double regrid_sigma = 1.0;
+static double regrid_sigma[3] = { 1.0, 1.0, 1.0 };
 
 /* output file parameters */
 static char *out_config_fn = NULL;
@@ -221,8 +220,8 @@ static ArgvInfo argTable[] = {
     "Use linear interpolation for the reconstruction."},
    {"-nearest", ARGV_CONSTANT, (char *)NEAREST_FUNC, (char *)&regrid_type,
     "Use nearest neighbour reconstruction."},
-   {"-sigma", ARGV_FLOAT, (char *)1, (char *)&regrid_sigma,
-    "Value of sigma for -gaussian and -kaiser_bessel function"},
+   {"-sigma", ARGV_FLOAT, (char *)3, (char *)&regrid_sigma,
+    "3D sigma value for -gaussian and -kaiser_bessel functions"},
 
    {NULL, ARGV_HELP, NULL, NULL, "\nArbitrary path Regridding options"},
    {"-arb_path", ARGV_STRING, (char *)1, (char *)&ap_coord_fn,
@@ -255,7 +254,7 @@ int main(int argc, char *argv[])
    
    long     t = 0;
 
-   /* start the time counter*/
+   /* start the time counter */
    current_realtime_seconds();
    
    /* get the history string */
@@ -315,8 +314,8 @@ int main(int argc, char *argv[])
       }
 
    /* check sigma */
-   if(regrid_sigma <= 0){
-      fprintf(stderr, "%s: -sigma must be greater than 0.\n\n", argv[0]);
+   if(regrid_sigma[0] <= 0 || regrid_sigma[1] <= 0 || regrid_sigma[2] <= 0 ){
+      fprintf(stderr, "%s: -sigma must be greater than 0\n\n", argv[0]);
       exit(EXIT_FAILURE);
       }
 
@@ -388,13 +387,15 @@ int main(int argc, char *argv[])
 
    fprintf(stderr, "2Sizes: [%d:%d:%d] \n", sizes[perm[0]], sizes[perm[1]], sizes[perm[2]]);
    
-   /* initialize weights to be arbitray large value if using NEAREST interpolation and not
-   arbitrary path, otherwise initialize them to zero */
-   if(regrid_type == NEAREST_FUNC && ap_coord_fn == NULL) {
+   /* initialize weights to be arbitray large value if using NEAREST */
+   /* volume interpolation else initialize all to zero */
+   if(regrid_type == NEAREST_FUNC && ap_coord_fn == NULL){
       initial_weight = LARGE_INITIAL_WEIGHT;
-   } else {
+      }
+   else{
       initial_weight = 0.0;
-   }
+      }
+   
    /* initialize weights and totals */   
    for(k = sizes[Z_IDX]; k--;){
       for(j = sizes[Y_IDX]; j--;){
@@ -978,7 +979,6 @@ void regrid_point(Volume * totals, Volume * weights,
             euc[2] = fabs(c_pos[2] - coord[2]);
 
             euc_dist = sqrt(SQR2(euc[0]) + SQR2(euc[1]) + SQR2(euc[2]));
-//            if(euc_dist <= regrid_radius){
 
             if((regrid_radius[0] == 0 || euc[0] <= regrid_radius[0]) &&
                (regrid_radius[1] == 0 || euc[1] <= regrid_radius[1]) &&
@@ -991,55 +991,46 @@ void regrid_point(Volume * totals, Volume * weights,
                           __FILE__, __LINE__);
                   exit(EXIT_FAILURE);
                   break;
-
+                  
                case NEAREST_FUNC:
-                  //fprintf(stderr, "Erk! -nearest is not implemented yet\n");
-                  //exit(EXIT_FAILURE);
-                  weight = euc_dist;
-                  break;
-
                case LINEAR_FUNC:
                   weight = euc_dist;
                   break;
-
+                  
                case KAISERBESSEL_FUNC:
                   weight =
-                     gsl_sf_bessel_I0(regrid_sigma *
+                     gsl_sf_bessel_I0(regrid_sigma[0] *
                                       sqrt(1 - SQR2(euc[0] / regrid_radius[0]))) *
-                     gsl_sf_bessel_I0(regrid_sigma *
+                     gsl_sf_bessel_I0(regrid_sigma[1] *
                                       sqrt(1 - SQR2(euc[1] / regrid_radius[1]))) *
-                     gsl_sf_bessel_I0(regrid_sigma *
+                     gsl_sf_bessel_I0(regrid_sigma[2] *
                                       sqrt(1 - SQR2(euc[2] / regrid_radius[2]))) /
                      SQR3((regrid_radius[0] + regrid_radius[1] + regrid_radius[2]) / 3);
-
                   break;
-
+                  
                case GAUSSIAN_FUNC:
-                  weight = exp(-SQR2(euc_dist) / SQR2(regrid_sigma));
-           //       fprintf(stderr, "weight %g    euc_dist: %g [%g:%g:%g]  regrid_sigma: %g\n", weight, euc_dist, euc[0], euc[1], euc[2], regrid_sigma   );
+                  weight = exp(-SQR2(euc[0]) / SQR2(regrid_sigma[0])) *
+                           exp(-SQR2(euc[1]) / SQR2(regrid_sigma[1])) *
+                           exp(-SQR2(euc[2]) / SQR2(regrid_sigma[2]));
                   break;
                   }
-
+               
                /* set data values */
-               if(regrid_type == NEAREST_FUNC) {
+               if(regrid_type == NEAREST_FUNC){
                   value = get_volume_real_value(*weights, k, j, i, 0, 0);
-                  if(weight < value) {
+                  if(weight < value){
                      set_volume_real_value(*weights, k, j, i, 0, 0, weight);
-                     for(v = 0; v < v_size; v++) {
+                     for(v = 0; v < v_size; v++){
                         set_volume_real_value(*totals, k, j, i, v, 0,
                                                data_buf[0 + v] * weight);
+                        }
                      }
                   }
-               } else {
+               else{
                   for(v = 0; v < v_size; v++){
                      value = get_volume_real_value(*totals, k, j, i, v, 0);
                      set_volume_real_value(*totals, k, j, i, v, 0,
                                           value + (data_buf[0 + v] * weight));
-            //       fprintf(stderr, "At point: %d:%d:%d:%d   ss [%d:%d:%d]-[%d:%d:%d]  value: %g (%g)\n", 
-            //               i, j, k, v, 
-            //               start_idx[0], start_idx[1], start_idx[2], 
-            //               stop_idx[0], stop_idx[1], stop_idx[2], 
-            //               value + (data_buf[0 + v]),  weight);
                      }
    
                   /* increment count value */
