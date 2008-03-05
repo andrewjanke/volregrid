@@ -1,12 +1,13 @@
+2008-03-05 Andrew L Janke <a.janke@gmail.com>
+	* added 3D sigma option (originally only isotropic regrids)
+
 2007-08-16 Charles Yan <cyan@bic.mni.mcgill.ca>
-   * Added linear regridding option and implemented nearest regridding
-   * Added the display of total time it took to reconstruct the volume
+	* Added linear regridding option and implemented nearest regridding
+	* Added the display of total time it took to reconstruct the volume
 
 2004-05-06 Andrew L. Janke  <rotor@cmr.uq.edu.au>
-
-   * Added README
-   * replaced erky for_less MACRO with real code
+	* Added README
+	* replaced erky for_less MACRO with real code
 
 2004-04-22 Andrew L. Janke  <rotor@cmr.uq.edu.au>
-
-   * Inital GNU'ish entry
+	* Inital GNU'ish entry
