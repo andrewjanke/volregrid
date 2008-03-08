@@ -1,11 +1,13 @@
-        New in Release 1.1.1
 
-* Simply repackage the tar ball with good m4 files for minc2
+New in Release 1.2.0
+	* added NEAREST and LINEAR function (thanks to Charles Yan)
+	* added 3D regrid sigma option for GAUSSIAN and KAISER_BESEL functions
 
-        New in Release 1.1
+New in Release 1.1.1
+	* Simply repackage the tar ball with good m4 files for minc2
 
-* Added README file
+New in Release 1.1
+	* Added README file
 
-        New in Release 1.0
-
-* Inital release
+New in Release 1.0
+	* Inital release
