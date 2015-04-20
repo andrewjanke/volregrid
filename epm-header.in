@@ -1,9 +1,0 @@
-%product volregrid
-%copyright 2000-2009 Andrew Janke & Mark Griffin
-%vendor McConnell Brain Imaging Centre
-%packager Andrew Janke <a.janke@gmail.com>
-%license COPYING
-%readme README
-%description MINC volume regridding package
-%version @VERSION@
-%requires minc
