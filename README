@@ -1,4 +1,14 @@
 volregrid - Volume Regridding
 
+To build use CMake (presuming you have MINC in /opt/minc):
+
+   $ export CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH:/opt/minc/lib
+
+   $ cd volregrid
+   $ mkdir build
+   $ cmake ..
+   $ make
+
+
 Comments to:
 Andrew Janke - a.janke@gmail.com

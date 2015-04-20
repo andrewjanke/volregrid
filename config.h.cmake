@@ -1,0 +1,12 @@
+/* various defines */
+
+#define MINC2 1
+
+#define PACKAGE_NAME "@PACKAGE_NAME@"
+#define PACKAGE_BUGREPORT "@PACKAGE_BUGREPORT@"
+#define PACKAGE_VERSION "@PACKAGE_VERSION@"
+#define PACKAGE_STRING "@PACKAGE_STRING@"
+#define VERSION PACKAGE_VERSION
+
+#define H5Acreate_vers 2
+
