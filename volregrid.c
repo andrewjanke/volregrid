@@ -23,7 +23,6 @@
 /* Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. */
 
 
-#include <config.h>
 #include <math.h>
 #include <float.h>
 #include <sys/stat.h>
@@ -1134,8 +1133,8 @@ int get_model_file_info(char *dst, char *key, char *nextArg)
 void print_version_info(void)
 {
    fprintf(stdout, "\n");
-//   fprintf(stdout, "%s version %s\n", PACKAGE, VERSION);
-//   fprintf(stdout, "Comments to %s\n", PACKAGE_BUGREPORT);
+   fprintf(stdout, "%s version %s\n", PACKAGE_NAME, PACKAGE_VERSION);
+   fprintf(stdout, "Comments to %s\n", PACKAGE_BUGREPORT);
    fprintf(stdout, "\n");
    exit(EXIT_SUCCESS);
    }
