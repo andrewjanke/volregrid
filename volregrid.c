@@ -28,6 +28,7 @@
 #include <float.h>
 #include <sys/stat.h>
 #include <ctype.h>
+#include <minc.h>
 #include <volume_io.h>
 #include <ParseArgv.h>
 #include <time_stamp.h>
@@ -66,8 +67,8 @@ typedef enum {
 /* function prototypes */
 int      read_config_file(char *filename, char *args[]);
 int      get_model_file_info(char *dst, char *key, char *nextArg);
-void     scale_volume(Volume * vol, double o_min, double o_max, double min, double max);
-void     regrid_point(Volume * totals, Volume * weights,
+void     scale_volume(VIO_Volume * vol, double o_min, double o_max, double min, double max);
+void     regrid_point(VIO_Volume * totals, VIO_Volume * weights,
                       double x, double y, double z, int v_size, double *data_buf);
 void     regrid_loop(void *caller_data, long num_voxels,
                      int input_num_buffers, int input_vector_length,
@@ -75,10 +76,10 @@ void     regrid_loop(void *caller_data, long num_voxels,
                      int output_num_buffers, int output_vector_length,
                      double *output_data[], Loop_Info * loop_info);
 void     regrid_minc(char *in_fn, int buff_size,
-                     Volume * totals, Volume * weights, int v_size,
+                     VIO_Volume * totals, VIO_Volume * weights, int v_size,
                      double regrid_floor, double regrid_ceil);
 void     regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
-                         Volume * totals, Volume * weights, int v_size,
+                         VIO_Volume * totals, VIO_Volume * weights, int v_size,
                          double regrid_floor, double regrid_ceil);
 void     print_version_info(void);
 
@@ -237,8 +238,8 @@ int main(int argc, char *argv[])
    int      n_infiles;
    char    *out_fn;
    char    *history;
-   progress_struct progress;
-   Volume   totals, weights;
+   VIO_progress_struct progress;
+   VIO_Volume   totals, weights;
    int      i, j, k, v;
    double   min, max;
    double   w_min, w_max;
@@ -246,7 +247,7 @@ int main(int argc, char *argv[])
    double   weight, value;
    double   initial_weight;
 
-   Real     dummy[3];
+   VIO_Real     dummy[3];
 
    int      sizes[MAX_VAR_DIMS];
    double   starts[MAX_VAR_DIMS];
@@ -514,7 +515,7 @@ int main(int argc, char *argv[])
       fprintf(stdout, " | Outputting %s...\n", out_fn);
       }
    if(output_volume(out_fn, out_dtype, out_is_signed,
-                    0.0, 0.0, totals, history, NULL) != OK){
+                    0.0, 0.0, totals, history, NULL) != VIO_OK){
       fprintf(stderr, "Problems outputing: %s\n\n", out_fn);
       }
 
@@ -524,7 +525,7 @@ int main(int argc, char *argv[])
          fprintf(stdout, " | Outputting %s...\n", weights_fn);
          }
       if(output_volume(weights_fn, out_dtype, out_is_signed,
-                       0.0, 0.0, weights, history, NULL) != OK){
+                       0.0, 0.0, weights, history, NULL) != VIO_OK){
          fprintf(stderr, "Problems outputting: %s\n\n", weights_fn);
          }
       }
@@ -533,7 +534,7 @@ int main(int argc, char *argv[])
    delete_volume(weights);
    
    t = current_realtime_seconds();
-   printf("Total reconstruction time: %d hours %d minutes %d seconds\n", t/3600, (t/60)%60, t%60);
+   printf("Total reconstruction time: %ld hours %ld minutes %ld seconds\n", t/3600, (t/60)%60, t%60);
    
    return (EXIT_SUCCESS);
    }
@@ -556,12 +557,12 @@ int main(int argc, char *argv[])
 /*                                                                           */
 /*    b = min - (o_min * a)                                                  */
 /*                                                                           */
-void scale_volume(Volume * vol, double o_min, double o_max, double min, double max)
+void scale_volume(VIO_Volume * vol, double o_min, double o_max, double min, double max)
 {
    double   value, a, b;
    int      sizes[MAX_VAR_DIMS];
    int      i, j, k, v;
-   progress_struct progress;
+   VIO_progress_struct progress;
 
    get_volume_sizes(*vol, sizes);
 
@@ -603,8 +604,8 @@ typedef struct {
 
    double  *data_buf;
 
-   Volume  *totals;
-   Volume  *weights;
+   VIO_Volume  *totals;
+   VIO_Volume  *weights;
 
    } Loop_Data;
 
@@ -671,7 +672,7 @@ void regrid_loop(void *caller_data, long num_voxels,
 
 /* regrid using a minc volume */
 void regrid_minc(char *in_fn, int buffer_size,
-                 Volume * totals, Volume * weights, int v_size,
+                 VIO_Volume * totals, VIO_Volume * weights, int v_size,
                  double regrid_floor, double regrid_ceil)
 {
    Loop_Data ld;
@@ -708,7 +709,7 @@ void regrid_minc(char *in_fn, int buffer_size,
 /* regrid a volume with an arbitrary path     */
 /* return resulting totals and weights volumes */
 void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
-                     Volume * totals, Volume * weights, int v_size,
+                     VIO_Volume * totals, VIO_Volume * weights, int v_size,
                      double regrid_floor, double regrid_ceil)
 {
    Coord_list coord_buf;
@@ -895,13 +896,13 @@ void regrid_arb_path(char *coord_fn, char *data_fn, int buff_size,
    }
 
 /* regrid a point in a file using the input co-ordinate and data */
-void regrid_point(Volume * totals, Volume * weights,
+void regrid_point(VIO_Volume * totals, VIO_Volume * weights,
                   double x, double y, double z, int v_size, double *data_buf)
 {
 
    int      sizes[MAX_VAR_DIMS];
-   Real     steps[MAX_VAR_DIMS];
-   Real     starts[MAX_VAR_DIMS];
+   VIO_Real     steps[MAX_VAR_DIMS];
+   VIO_Real     starts[MAX_VAR_DIMS];
    int      start_idx[3];
    int      stop_idx[3];
    double   value, weight;
@@ -911,9 +912,9 @@ void regrid_point(Volume * totals, Volume * weights,
    int      i, j, k, v;
    double   coord[3];                  /* target point in mm  coordinates, in X, Y, Z order */
 
-   Transform dircos, invdircos;
-   Vector   vector;
-   Real     dir[3];
+   VIO_Transform dircos, invdircos;
+   VIO_Vector   vector;
+   VIO_Real     dir[3];
 
    /* the coord used below has to be in mm coordinates in the dircos space of the 
       target volume.  Hence the manipulations with the vols direction_cosines      */
@@ -1133,8 +1134,8 @@ int get_model_file_info(char *dst, char *key, char *nextArg)
 void print_version_info(void)
 {
    fprintf(stdout, "\n");
-   fprintf(stdout, "%s version %s\n", PACKAGE, VERSION);
-   fprintf(stdout, "Comments to %s\n", PACKAGE_BUGREPORT);
+//   fprintf(stdout, "%s version %s\n", PACKAGE, VERSION);
+//   fprintf(stdout, "Comments to %s\n", PACKAGE_BUGREPORT);
    fprintf(stdout, "\n");
    exit(EXIT_SUCCESS);
    }
