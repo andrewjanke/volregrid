@@ -1,5 +1,6 @@
 2015-04-20 Andrew L Janke <a.janke@gmail.com>
    * changed from automake/conf to CMake so suit the new MINC world order
+   * updated to build against MINC2
 
 2008-03-05 Andrew L Janke <a.janke@gmail.com>
 	* added 3D sigma option (originally only isotropic regrids)
