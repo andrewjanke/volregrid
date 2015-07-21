@@ -7,7 +7,7 @@
 #
 # to ensure that CMake finds /opt/minc/lib/LIBMINCConfig.cmake
 
-CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
+CMAKE_MINIMUM_REQUIRED(VERSION 2.8 FATAL_ERROR)
 
 
 PROJECT(volregrid)
@@ -45,6 +45,45 @@ ADD_EXECUTABLE(volregrid
                 minc_support.c
                 ${FLEX_lex_OUTPUTS}
                )
+
+# manual page generation
+#ADD_CUSTOM_TARGET(volregrid.1 ALL)
+#
+#ADD_CUSTOM_COMMAND(
+#   OUTPUT volregrid.1
+#   COMMAND groff ARGS -Tascii -man ${CMAKE_CURRENT_SOURCE_DIR}/volregrid.man1 > ${CMAKE_CURRENT_BINARY_DIR}/volregrid.1
+#   DEPENDS volregrid.man1
+#   COMMENT Building man page for volregrid
+#)
+#
+#INSTALL(FILES ${CMAKE_CURRENT_BINARY_DIR}/volregrid.1 DESTINATION ${CMAKE_INSTALL_PREFIX}/man/man1)
+
+
+## new version
+find_program(GROFF_EXECUTABLE NAMES groff)
+set(GROFF_OPTS
+  -Tascii
+  -man
+  )
+
+set(MAN_NAMES volregrid.man1)
+set(MAN_FILES)
+foreach(m IN LISTS MAN_NAMES)
+  set(ms ${CMAKE_BINARY_DIR}/${m})
+  set(mf ${CMAKE_SOURCE_DIR}/volregrid.1)
+  add_custom_command(OUTPUT ${mf}
+    COMMAND ${GROFF_EXECUTABLE} ${GROFF_OPTS} ${CMAKE_CURRENT_SOURCE_DIR}/${ms} > ${CMAKE_CURRENT_BINARY_DIR}/${mf}
+    DEPENDS ${ms}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Building manpage ${mf}"
+    VERBATIM)
+  list(APPEND MAN_FILES ${mf})
+endforeach()
+
+add_custom_target(man ALL DEPENDS ${MAN_FILES})
+
+
+
 
 # what and where to install
 INSTALL( TARGETS volregrid  DESTINATION bin)
